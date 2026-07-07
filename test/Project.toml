@@ -1,0 +1,18 @@
+[deps]
+EFIT = "cda752c5-6b03-55a3-9e33-132a441b0c17"
+HDF5 = "f67ccb44-e63f-5c2f-98bd-6dc0ccc4ba2f"
+M3DC1Reader = "a153a891-5ed3-4a31-bd4a-071a6c920149"
+MXHEquilibrium = "8efa4e5a-7b9a-4eec-876e-01d13d5b5d75"
+Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+TestItemRunner = "f8b46487-2199-4994-9208-9a1283c18c0a"
+
+[sources]
+M3DC1Reader = {path = ".."}
+
+[compat]
+EFIT = "1"
+HDF5 = "0.17"
+MXHEquilibrium = "1"
+TestItemRunner = "1"
+julia = "1.10"

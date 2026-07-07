@@ -1,0 +1,350 @@
+# ascot5.jl — ASCOT5 input-file writer (Pipeline ①).
+#
+# Writes one a5py-compatible input HDF5 per time slice: bfield/B_3DS (3D
+# field snapshot), plasma/plasma_1D (FSA background), wall/wall_2D (mesh
+# boundary), efield/E_TC (zero). Layouts copied verbatim from the ASCOT5
+# sources (a5py/ascot5io/{bfield,plasma,wall,efield}.py and
+# coreio/fileapi.py) — see docs/ascot5_writer.md.
+#
+# Time handling: ASCOT5 traces particles in a STATIC field, so each MHD
+# slice gets its own input file (one run per snapshot); the DB pipeline
+# matches runs to slices by the step number in the `ascot<step>.h5` output
+# filename, so `write_ascot5` embeds the slice's ntimestep in the default
+# output name.
+
+using Dates: now, format
+
+"""
+    _collapse_zeta(coef, ζ; dphi=false) -> Matrix (20 × nelms)
+
+Collapse an 80-coefficient 3D Hermite block to the effective 20-coefficient
+poloidal representation at local toroidal angle `ζ` (radians from the wedge
+start): `c_eff = c₁ + ζc₂ + ζ²c₃ + ζ³c₄` over the four 20-row layers.
+With `dphi=true` return ∂/∂ζ instead (`c₂ + 2ζc₃ + 3ζ²c₄`) — the toroidal
+derivative used for legacy files whose `f` dataset is the potential itself.
+"""
+function _collapse_zeta(coef::AbstractMatrix, ζ::Real; dphi::Bool = false)
+    size(coef, 1) >= 80 || error("_collapse_zeta: expected ≥80 coefficient rows")
+    c1 = view(coef, 1:20, :);  c2 = view(coef, 21:40, :)
+    c3 = view(coef, 41:60, :);  c4 = view(coef, 61:80, :)
+    return dphi ? c2 .+ (2ζ) .* c3 .+ (3ζ^2) .* c4 :
+        c1 .+ ζ .* c2 .+ ζ^2 .* c3 .+ ζ^3 .* c4
+end
+
+"""
+    ascot5_bfield(file, ts; nR=150, nZ=150, nphi=0) -> NamedTuple
+
+Assemble the ASCOT5 `B_3DS` field data for one time slice, in SI units:
+
+- `Rg`, `Zg` [m]: uniform grids over the mesh bounding box, padded by
+  `margin` (fraction of the R/Z span; default 2% — just enough that the
+  wall polyline is strictly inside the grid); `phi_deg`:
+  the `nphi` periodic toroidal nodes (`linspace(0, 360, nphi+1)[1:end-1]`,
+  the a5py storage convention). `nphi=0` (default) means `4 × nplanes` —
+  8 points per wavelength of the highest mode the run resolves.
+- `psi` [Wb/rad] (nR×nZ): the n=0 poloidal-flux map (per-radian — exactly
+  ASCOT5's `Vs/m`), with `psi0`/`psi1` (axis/separatrix) and `axisr`/`axisz`
+  from the per-slice `find_lcfs` recomputation.
+- `br`, `bz` [T] (nR×nphi×nZ): **perturbation only** — B_3DS's convention is
+  that the equilibrium poloidal field is reconstructed from ∇ψ, so the n=0
+  part is subtracted here. `bphi` [T] is the total toroidal field.
+
+The 3D field is evaluated from the exact FEM representation
+`B = ∇ψ×∇φ + F∇φ − ∇⊥f′` at each φ node via [`_collapse_zeta`](@ref)
+(docs/m3dc1_field_representation.md). Grid points outside the mesh are
+`NaN` — the fill strategy for the rectangle's corners is deliberately left
+to the caller/operator for now (see docs/ascot5_writer.md §fill).
+"""
+function ascot5_bfield(
+        file::M3DC1File, ts::Integer;
+        nR::Integer = 150, nZ::Integer = 150, nphi::Integer = 0,
+        margin::Real = 0.02
+    )
+    nplanes = file.nplanes
+    npp = file.npp
+    nphi <= 0 && (nphi = 4 * nplanes)
+    norm = normalization(file)
+    ulen = unit_factor(norm, :length; system = :si)
+    ub = unit_factor(norm, :magnetic_field; system = :si)
+    uflux = unit_factor(norm, :magnetic_flux; system = :si)
+
+    ep = elems_plane(file)
+    Rb, Zb = mesh_boundary_rz(ep)
+    ΔR = maximum(Rb) - minimum(Rb);  ΔZ = maximum(Zb) - minimum(Zb)
+    Rg_n = collect(
+        range(
+            max(minimum(Rb) - margin * ΔR, 0.01 * ΔR),
+            maximum(Rb) + margin * ΔR; length = nR
+        )
+    )
+    Zg_n = collect(
+        range(
+            minimum(Zb) - margin * ΔZ,
+            maximum(Zb) + margin * ΔZ; length = nZ
+        )
+    )
+    id_map = build_grid_to_element_map(Rg_n, Zg_n, ep)
+
+    # ASCOT B_3DS is evaluated at arbitrary φ (ζ-collapse), so it needs the
+    # FULL 80-coefficient Hermite blocks — not the ζ=0 leading rows the FSA
+    # export gets away with.
+    sl = read_timeslice(file, ts; fields = (:psi, :I))
+    psi3 = sl.fields[:psi];  I3 = sl.fields[:I]
+    fprime = _fprime_stored(file)
+    f3 = _try_field(file, ts, fprime ? :fp : :f; rows = Colon())
+
+    # n=0 ψ map + axis/separatrix flux (same recipe as reduce_axisym_slice)
+    psi_av = average_toroidal_axisymmetric(psi3, nplanes)
+    pg0 = interpolate_axisym_gradient_to_grid(psi_av, ep, Rg_n, Zg_n; id_map = id_map)
+    I_av = average_toroidal_axisymmetric(I3, nplanes)
+    I0v = interpolate_axisym_to_grid(I_av, ep, Rg_n, Zg_n; id_map = id_map)
+    ψ0 = Float64(sl.psi_axis);  ψ1 = Float64(sl.psi_lcfs)
+    R_ax = Float64(sl.xmag);    Z_ax = Float64(sl.zmag)
+    lim = limiter_points(file)
+    lc = try
+        find_lcfs(
+            psi_av, ep; xmag = R_ax, zmag = Z_ax,
+            xnull = sl.xnull, znull = sl.znull,
+            xnull2 = sl.xnull2, znull2 = sl.znull2,
+            lim.xlim, lim.zlim, lim.xlim2, lim.zlim2
+        )
+    catch err
+        @warn "ascot5_bfield: axis/LCFS recomputation failed; using stored plane-1 scalars" exception = err
+        nothing
+    end
+    if lc !== nothing
+        ψ0 = lc.psi_axis;  R_ax = lc.axis.R;  Z_ax = lc.axis.Z
+        isfinite(lc.psi_bound) && (ψ1 = lc.psi_bound)
+    end
+
+    Δφ = file.period / nplanes
+    phis = [(j - 1) * file.period / nphi for j in 1:nphi]
+    br = fill(NaN, nR, nphi, nZ)
+    bphi = fill(NaN, nR, nphi, nZ)
+    bz = fill(NaN, nR, nphi, nZ)
+    for (j, φ) in enumerate(phis)
+        p = min(floor(Int, φ / Δφ) + 1, nplanes)
+        ζ = φ - (p - 1) * Δφ
+        cols = ((p - 1) * npp + 1):(p * npp)
+        ψeff = _collapse_zeta(view(psi3, :, cols), ζ)
+        Ieff = _collapse_zeta(view(I3, :, cols), ζ)
+        pgp = interpolate_axisym_gradient_to_grid(ψeff, ep, Rg_n, Zg_n; id_map = id_map)
+        Iv = interpolate_axisym_to_grid(Ieff, ep, Rg_n, Zg_n; id_map = id_map)
+        fg = nothing
+        if f3 !== nothing
+            feff = _collapse_zeta(view(f3, :, cols), ζ; dphi = !fprime)
+            fg = interpolate_axisym_gradient_to_grid(feff, ep, Rg_n, Zg_n; id_map = id_map)
+        end
+        @inbounds for k in 1:nZ, i in 1:nR
+            R = Rg_n[i]
+            brt = -pgp.dZ[i, k] / R
+            bzt = pgp.dR[i, k] / R
+            if fg !== nothing
+                brt -= fg.dR[i, k]
+                bzt -= fg.dZ[i, k]
+            end
+            # B_3DS: br/bz carry only the non-equilibrium part (ψ carries n=0)
+            br[i, j, k] = (brt - (-pg0.dZ[i, k] / R)) * ub
+            bz[i, j, k] = (bzt - (pg0.dR[i, k] / R)) * ub
+            bphi[i, j, k] = (Iv[i, k] / R) * ub
+        end
+    end
+
+    return (;
+        Rg = Rg_n .* ulen, Zg = Zg_n .* ulen,
+        phi_deg = phis .* (360 / file.period),
+        psi = Array{Float64}(pg0.val) .* uflux,
+        psi0 = ψ0 * uflux, psi1 = ψ1 * uflux,
+        axisr = R_ax * ulen, axisz = Z_ax * ulen,
+        br = br, bphi = bphi, bz = bz,
+        bphi0_rz = (I0v ./ Rg_n) .* ub,       # n=0 Bφ map (for diagnostics)
+        time = sl.time * unit_factor(norm, :time; system = :si),
+        nstep = sl.nstep,
+    )
+end
+
+# ---------------------------------------------------------------------------
+# a5py HDF5 conventions (coreio/fileapi.py): every input lives in
+# <parent>/<TYPE>_<qid> with a random zero-padded 10-digit uint32 QID,
+# byte-string `description`/`date` attrs, and the parent carries
+# `active` = qid of the input to use. Attributes must be ASCII-typed so
+# h5py hands them back as `bytes` (a5py calls `.decode()` on them).
+# ---------------------------------------------------------------------------
+
+function _a5_ascii_attr!(obj, name::AbstractString, s::AbstractString)
+    buf = Vector{UInt8}(codeunits(String(s)))
+    dt = HDF5.Datatype(HDF5.API.h5t_copy(HDF5.API.H5T_C_S1))
+    HDF5.API.h5t_set_size(dt, max(length(buf), 1))
+    HDF5.API.h5t_set_cset(dt, HDF5.API.H5T_CSET_ASCII)
+    attr = create_attribute(obj, String(name), dt, dataspace(()))
+    try
+        # low-level write: the fixed-length string is ONE element of `size(dt)`
+        # bytes, which the high-level length check would reject
+        HDF5.API.h5a_write(attr, dt, buf)
+    finally
+        close(attr)
+    end
+    return nothing
+end
+
+_a5_qid() = lpad(string(rand(UInt32)), 10, '0')
+
+function _a5_group(
+        f::HDF5.File, parent::String, gtype::String;
+        desc::AbstractString = "M3DC1Reader export", qid::String = _a5_qid()
+    )
+    pg = haskey(f, parent) ? f[parent] : create_group(f, parent)
+    g = create_group(pg, "$(gtype)_$(qid)")
+    _a5_ascii_attr!(g, "description", desc)
+    _a5_ascii_attr!(g, "date", format(now(), "yyyy-mm-dd HH:MM:SS"))
+    haskey(HDF5.attrs(pg), "active") || _a5_ascii_attr!(pg, "active", qid)
+    return g
+end
+
+# a5py stores everything through h5py (row-major); HDF5.jl reverses dims on
+# write, so a Julia (a,b,…) array lands on disk as (…,b,a) — the shapes below
+# are chosen so the DISK layout matches a5py's exactly.
+_a5_i4(g, name, v::Integer) = (g[name] = fill(Int32(v), 1, 1))   # disk (1,1)
+_a5_scalar(g, name, v::Real) = (g[name] = [Float64(v)])         # disk (1,)
+_a5_scalar_i(g, name, v::Integer) = (g[name] = [Int32(v)])           # disk (1,)
+_a5_col(g, name, v::AbstractVector) = (g[name] = reshape(Float64.(v), 1, :))  # disk (n,1)
+_a5_col_i(g, name, v::AbstractVector) = (g[name] = reshape(Int32.(v), 1, :))    # disk (n,1)
+
+"""
+    write_ascot5(file, ts, out_path=""; nR=150, nZ=150, nphi=0, nbins=128,
+                 desc="") -> out_path
+
+Write one ASCOT5 input HDF5 for time slice `ts`: `bfield/B_3DS`
+([`ascot5_bfield`](@ref)), `plasma/plasma_1D` (FSA profiles on ρ_pol, ions =
+main D-like species + fully-stripped KPRAD impurity when active),
+`wall/wall_2D` ([`mesh_boundary_rz`](@ref)) and a zero `efield/E_TC`.
+Markers and options are the ASCOT operator's domain and are not written.
+
+`out_path=""` names the file `ascot5_in_<ntimestep>.h5` next to the C1.h5 —
+the step number is what the DB pipeline later uses to match ASCOT output
+files to MHD slices. Off-mesh grid points in the B field are `NaN` (fill
+strategy pending — docs/ascot5_writer.md); a5py reads the file fine, but the
+field must be filled before an actual ASCOT run.
+"""
+function write_ascot5(
+        file::M3DC1File, ts::Integer, out_path::AbstractString = "";
+        nR::Integer = 150, nZ::Integer = 150, nphi::Integer = 0,
+        margin::Real = 0.02, nbins::Integer = 128, desc::AbstractString = ""
+    )
+    norm = normalization(file)
+    bf = ascot5_bfield(file, ts; nR = nR, nZ = nZ, nphi = nphi, margin = margin)
+    if isempty(out_path)
+        out_path = joinpath(dirname(file.path), "ascot5_in_$(bf.nstep).h5")
+    end
+    isempty(desc) && (desc = "M3DC1Reader $(basename(file.path)) slice $ts (t=$(bf.time) s)")
+
+    # FSA background plasma on the shared ρ_pol grid
+    ep = elems_plane(file)
+    Rg_n = collect(range(extrema(ep[5, :])..., length = 120))
+    Zg_n = collect(range(extrema(ep[6, :])..., length = 120))
+    idm = build_grid_to_element_map(Rg_n, Zg_n, ep)
+    sl = read_timeslice(file, ts; fields = (:psi,), rows = 1:20)
+    fields = Dict{Symbol, Matrix{Float64}}(:psi => sl.fields[:psi])
+    kz = _kprad_z(file)
+    flds = kz >= 0 ? (_OPT_FIELDS..., :I, (Symbol("kprad_n_" * lpad(iz, 2, '0')) for iz in 0:kz)...) :
+        (_OPT_FIELDS..., :I)
+    for fld in flds
+        v = _try_field(file, ts, fld)
+        v === nothing || (fields[fld] = v)
+    end
+    lim = limiter_points(file)
+    prof = reduce_axisym_slice(
+        fields, ep, file.nplanes, norm,
+        sl.psi_axis, sl.psi_lcfs, sl.xmag, sl.zmag,
+        sl.time * unit_factor(norm, :time; system = :si),
+        Rg_n, Zg_n, idm;
+        nbins = nbins, kprad_z = kz,
+        sl.xnull, sl.znull, sl.xnull2, sl.znull2,
+        lim.xlim, lim.zlim, lim.xlim2, lim.zlim2
+    )
+
+    # nearest-finite fill + positivity floor (plasma_1D must be finite > 0)
+    function _fillprof(v, floor_)
+        v === nothing && return nothing
+        x = Float64.(v)
+        lastf = NaN
+        for i in eachindex(x)
+            isfinite(x[i]) ? (lastf = x[i]) : (x[i] = lastf)
+        end
+        for i in reverse(eachindex(x))
+            isfinite(x[i]) ? (lastf = x[i]) : (x[i] = lastf)
+        end
+        return max.(x, floor_)
+    end
+    ne = _fillprof(prof.ne, 1.0e6)          # m⁻³
+    te = _fillprof(prof.te, 1.0)          # eV
+    ti = _fillprof(prof.ti !== nothing ? prof.ti : prof.te, 1.0)
+    ni = _fillprof(prof.ni !== nothing ? prof.ni : prof.ne, 1.0e6)
+    (ne === nothing || te === nothing) &&
+        error("write_ascot5: ne/te FSA profiles unavailable for slice $ts")
+
+    # ion species: main D-like ion + total KPRAD impurity (fully-stripped
+    # charge assumed — the collision operator needs one Z per species)
+    imp = kz >= 0 && prof.imp_dens !== nothing ?
+        _fillprof(
+            reduce(
+                .+, (p for p in prof.imp_dens[2:end] if p !== nothing);
+                init = zeros(length(prof.rho))
+            ), 0.0
+        ) : nothing
+    imp_label, imp_a = _impurity_species(max(kz, 0))
+    anum = imp === nothing ? Int32[round(Int32, file.ion_mass)] :
+        Int32[round(Int32, file.ion_mass), round(Int32, imp_a)]
+    znum = imp === nothing ? Int32[1] : Int32[1, kz]
+    charge = znum
+    mass = imp === nothing ? Float64[file.ion_mass] : Float64[file.ion_mass, imp_a]
+
+    isfile(out_path) && rm(out_path)
+    h5open(String(out_path), "w") do f
+        # ---- bfield/B_3DS ----
+        g = _a5_group(f, "bfield", "B_3DS"; desc = desc)
+        _a5_scalar(g, "b_rmin", bf.Rg[1]);    _a5_scalar(g, "b_rmax", bf.Rg[end])
+        _a5_scalar_i(g, "b_nr", nR)
+        _a5_scalar(g, "b_zmin", bf.Zg[1]);    _a5_scalar(g, "b_zmax", bf.Zg[end])
+        _a5_scalar_i(g, "b_nz", nZ)
+        _a5_scalar(g, "b_phimin", 0.0);       _a5_scalar(g, "b_phimax", 360.0)
+        _a5_scalar_i(g, "b_nphi", length(bf.phi_deg))
+        _a5_scalar(g, "psi_rmin", bf.Rg[1]);  _a5_scalar(g, "psi_rmax", bf.Rg[end])
+        _a5_scalar_i(g, "psi_nr", nR)
+        _a5_scalar(g, "psi_zmin", bf.Zg[1]);  _a5_scalar(g, "psi_zmax", bf.Zg[end])
+        _a5_scalar_i(g, "psi_nz", nZ)
+        _a5_scalar(g, "axisr", bf.axisr);     _a5_scalar(g, "axisz", bf.axisz)
+        _a5_scalar(g, "psi0", bf.psi0);       _a5_scalar(g, "psi1", bf.psi1)
+        g["psi"] = bf.psi                     # disk (nz,nr), a5py reads back (nr,nz)
+        g["br"] = bf.br                      # disk (nz,nphi,nr)
+        g["bphi"] = bf.bphi
+        g["bz"] = bf.bz
+
+        # ---- plasma/plasma_1D ----
+        g = _a5_group(f, "plasma", "plasma_1D"; desc = desc)
+        nrho = length(prof.rho);  nion = length(znum)
+        _a5_i4(g, "nion", nion);  _a5_i4(g, "nrho", nrho)
+        _a5_col_i(g, "znum", znum);  _a5_col_i(g, "anum", anum)
+        _a5_col_i(g, "charge", charge)
+        _a5_col(g, "mass", mass)
+        _a5_col(g, "rho", prof.rho)
+        _a5_col(g, "vtor", zeros(nrho))
+        _a5_col(g, "etemperature", te);  _a5_col(g, "edensity", ne)
+        _a5_col(g, "itemperature", ti)
+        idens = imp === nothing ? reshape(ni, :, 1) : hcat(ni, imp)
+        g["idensity"] = Array{Float64}(idens)  # Julia (nrho,nion) → disk (nion,nrho)
+
+        # ---- wall/wall_2D ----
+        ulen = unit_factor(norm, :length; system = :si)
+        Rb, Zb = mesh_boundary_rz(ep)
+        g = _a5_group(f, "wall", "wall_2D"; desc = desc)
+        _a5_i4(g, "nelements", length(Rb))
+        _a5_col(g, "r", Rb .* ulen);  _a5_col(g, "z", Zb .* ulen)
+        _a5_col_i(g, "flag", zeros(Int32, length(Rb)))
+
+        # ---- efield/E_TC (zero field) ----
+        g = _a5_group(f, "efield", "E_TC"; desc = desc)
+        _a5_col(g, "exyz", zeros(3))
+    end
+    return String(out_path)
+end

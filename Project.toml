@@ -1,0 +1,32 @@
+name = "M3DC1Reader"
+uuid = "a153a891-5ed3-4a31-bd4a-071a6c920149"
+version = "0.1.0"
+authors = ["Min-Gu Yoo <mgyoo86@gmail.com>"]
+
+[deps]
+AdaptiveArrayPools = "4f381ef7-9af0-4cbe-99d4-cf36d7b0f233"
+Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
+FastInterpolations = "9ea80cae-fc13-4c00-8066-6eaedb12f34b"
+HDF5 = "f67ccb44-e63f-5c2f-98bd-6dc0ccc4ba2f"
+
+[weakdeps]
+EFIT = "cda752c5-6b03-55a3-9e33-132a441b0c17"
+IMAS = "13ead8c1-b7d1-41bb-a6d0-5b8b65ed587a"
+IMASdd = "c5a45a97-b3f9-491c-b9a7-aa88c3bc0067"
+MXHEquilibrium = "8efa4e5a-7b9a-4eec-876e-01d13d5b5d75"
+
+[extensions]
+M3DC1ReaderEFITExt = ["EFIT", "MXHEquilibrium"]
+M3DC1ReaderIMASExt = ["IMASdd", "IMAS"]
+M3DC1ReaderMXHEquilibriumExt = "MXHEquilibrium"
+
+[compat]
+AdaptiveArrayPools = "0.3"
+Dates = "1.11.0"
+EFIT = "1"
+FastInterpolations = "0.4"
+HDF5 = "0.17"
+IMAS = "7"
+IMASdd = "8"
+MXHEquilibrium = "1"
+julia = "1.10"
