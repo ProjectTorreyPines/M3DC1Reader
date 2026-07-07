@@ -53,6 +53,17 @@ jobs:
 
       - uses: julia-actions/cache@v2
 
+      # MXHEquilibrium / EFIT / IMASdd (test deps + weakdeps) live in the public
+      # FuseRegistry, not General. Add both before resolving. General is added
+      # explicitly because registering a custom registry on a fresh depot does
+      # not auto-include it.
+      - name: Add General + FuseRegistry
+        run: |
+          using Pkg
+          Pkg.Registry.add("General")
+          Pkg.Registry.add(Pkg.RegistrySpec(url = "https://github.com/ProjectTorreyPines/FuseRegistry.jl.git"))
+        shell: julia --color=yes {0}
+
       - uses: julia-actions/julia-buildpkg@v1
 
       - uses: julia-actions/julia-runtest@v1
