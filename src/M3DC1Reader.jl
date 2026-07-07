@@ -87,6 +87,6 @@ export psi_to_psi_norm, psi_n_to_rho_pol
 export write_omas_h5, assemble_ir, reduce_axisym_slice, export_imas
 
 # ---- equilibrium interop (experimental) ----
-export M3DAxisymField, axisym_field, to_mxh, to_geqdsk, to_imas, to_cocos
+export M3DAxisymField, axisym_field, to_mxh, to_geqdsk, to_imas, to_cocos, fsa_imas
 
 end # module

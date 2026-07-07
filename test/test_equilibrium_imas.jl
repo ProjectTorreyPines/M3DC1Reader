@@ -103,3 +103,85 @@ end
         @test quantile(rel, 0.95) < 0.02
     end
 end
+
+# fsa_imas plumbing: an independent IMAS contour FSA of a 2D field map. A
+# constant field must average to that constant on every traced surface (the
+# ∮f·dl/∮dl identity), and the ρ nodes must run axis→boundary. Gated like the
+# rest of this file (skips without IMASdd/IMAS).
+@testitem "fsa_imas contour FSA (constant-field plumbing)" begin
+    if Base.find_package("IMASdd") === nothing || Base.find_package("IMAS") === nothing
+        @info "skipping fsa_imas plumbing (IMAS/IMASdd unavailable)"
+    else
+        @eval using IMASdd, IMAS
+        R = range(1.0, 2.0; length = 65);  Z = range(-1.0, 1.0; length = 65)
+        psi_rz = [(r - 1.5)^2 + z^2 for r in R, z in Z]   # nested circular surfaces
+        psi1d = collect(range(0.0, 0.2; length = 48));  F1d = fill(3.4, 48)
+        eq = M3DAxisymField(;
+            cocos = 1, time = 0.0, R = R, Z = Z, psi_rz = psi_rz,
+            psi1d = psi1d, F1d = F1d, p1d = nothing, axis = (1.5, 0.0),
+            psi_axis = 0.0, psi_boundary = 0.2, r0 = 1.5, b0 = 2.27
+        )
+        fld = ones(length(R), length(Z))              # constant ⇒ ⟨f⟩ = 1 everywhere
+        res = fsa_imas(eq, fld, R, Z)
+        @test length(res.rho) == length(psi1d)
+        @test res.rho[1] ≈ 0.0 atol = 1.0e-9
+        @test res.rho[end] ≈ 1.0 atol = 1.0e-9
+        fin = isfinite.(res.avg)
+        @test count(fin) ≥ 20                          # most surfaces traced
+        @test all(v -> isapprox(v, 1.0; atol = 1.0e-6), res.avg[fin])
+        # a fully off-mesh (NaN) field cannot be sampled → all-NaN, no crash
+        res_nan = fsa_imas(eq, fill(NaN, length(R), length(Z)), R, Z)
+        @test all(isnan, res_nan.avg)
+        # grid/shape mismatch is a clear error
+        @test_throws ErrorException fsa_imas(eq, ones(3, 3), R, Z)
+    end
+end
+
+# Cross-validation of the :cumulative estimator against the IMAS contour FSA on
+# the circular analytic fixture: ψ=(ξ-ξ0)²+(η-η0)², constant F=I0 ⇒ analytic
+# ⟨|B|⟩ = √(I0²+4·ψ1s·ρ²)/R0. Both independent methods must match the closed form
+# AND each other. Deterministic (no data file) — runs whenever IMAS is present.
+@testitem "fsa_imas vs :cumulative ⟨|B|⟩ (circular cross-val)" begin
+    if Base.find_package("IMASdd") === nothing || Base.find_package("IMAS") === nothing
+        @info "skipping fsa_imas cross-val (IMAS/IMASdd unavailable)"
+    else
+        @eval using IMASdd, IMAS
+        norm = M3DNormalization(b0 = 1.0e4, n0 = 1.0e14, l0 = 100.0, ion_mass = 2.0)
+        ep = reshape([1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0], 10, 1)
+        ξ0, η0, R0 = 0.2, 0.3, 1.2
+        psi = zeros(80, 1)
+        psi[1, 1] = ξ0^2 + η0^2; psi[2, 1] = -2ξ0; psi[3, 1] = -2η0
+        psi[4, 1] = 1.0;         psi[6, 1] = 1.0
+        I0 = 4.0;  Ic = zeros(80, 1);  Ic[1, 1] = I0
+        fields = Dict{Symbol, Matrix{Float64}}(:psi => psi, :I => Ic)
+        ψ1s = 0.04
+        Rg = collect(range(0.95, 1.45, length = 100))
+        Zg = collect(range(0.05, 0.55, length = 100))
+        idm = build_grid_to_element_map(Rg, Zg, ep)
+
+        res = reduce_axisym_slice(
+            fields, ep, 1, norm, 0.0, ψ1s, R0, η0, 0.0, Rg, Zg, idm;
+            nbins = 64, fsa_method = :cumulative
+        )
+        # rebuild the equilibrium + |B| map from the returned SI arrays (norm makes
+        # the SI factors unity, so mesh numbers == SI numbers here)
+        eq = M3DAxisymField(;
+            cocos = 1, time = res.time, R = res.Rg, Z = res.Zg, psi_rz = res.psi_rz,
+            psi1d = res.psi1d, F1d = res.F1d, p1d = nothing,
+            axis = (res.R_axis, res.Z_axis), psi_axis = res.psi_axis,
+            psi_boundary = res.psi_boundary, r0 = R0, b0 = I0 / R0
+        )
+        babs_rz = sqrt.(res.br_rz .^ 2 .+ res.bz_rz .^ 2 .+ res.bphi_rz .^ 2)
+        im = fsa_imas(eq, babs_rz, res.Rg, res.Zg)
+
+        ρ = res.rho
+        b_an = [sqrt(I0^2 + 4 * ψ1s * r^2) / R0 for r in ρ]
+        m = isfinite.(im.avg) .& isfinite.(res.babs1d) .& (ρ .> 0.15) .& (ρ .< 0.85)
+        @test count(m) ≥ 10
+        # both methods match the analytic ⟨|B|⟩ within a few %
+        @test maximum(abs.((im.avg[m] .- b_an[m]) ./ b_an[m])) < 0.03
+        @test maximum(abs.((res.babs1d[m] .- b_an[m]) ./ b_an[m])) < 0.03
+        # and agree with each other
+        @test maximum(abs.((im.avg[m] .- res.babs1d[m]) ./ res.babs1d[m])) < 0.03
+    end
+end

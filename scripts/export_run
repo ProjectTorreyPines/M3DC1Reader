@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Self-contained M3D-C1 → IMAS export runner. Run it like an executable:
+#
+#   scripts/export_run <run_dir | C1.h5> [out.h5] [nbins= ngrid= cocos= pulse= slices= ascot5=]
+#
+# It handles the Julia setup (module load + project activation) and then runs
+# scripts/export_run.jl. Point it at a run folder; the multi-GB time_*.h5 slice
+# files next to C1.h5 are read via external links, and the IMAS HDF5 is written
+# into the same folder (default <run_dir>/M3DC1Reader_imas.h5).
+#
+# One-time env setup (registries + deps) before first use:
+#   julia --project=. -e 'using Pkg;
+#       Pkg.Registry.add("General");
+#       Pkg.Registry.add(url="https://github.com/ProjectTorreyPines/FuseRegistry.jl.git");
+#       Pkg.instantiate()'
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(dirname "$SCRIPT_DIR")"
+
+# --- Julia setup (EDIT this block for your site) -------------------------
+# If julia isn't already on PATH, try an HPC module. Replace `module load julia`
+# with your cluster's exact command, e.g. `module load julia/1.11`.
+if ! command -v julia >/dev/null 2>&1; then
+    module load julia 2>/dev/null || true
+fi
+if ! command -v julia >/dev/null 2>&1; then
+    echo "export_run: 'julia' not found — edit the Julia setup block in $0" >&2
+    exit 1
+fi
+
+# Project env: the cloned repo by default. Override to a shared env you added
+# M3DC1Reader into, e.g.  M3DC1_JULIA_PROJECT=@m3dc1 scripts/export_run ...
+PROJECT="${M3DC1_JULIA_PROJECT:-$REPO_DIR}"
+
+exec julia --project="$PROJECT" "$SCRIPT_DIR/export_run.jl" "$@"

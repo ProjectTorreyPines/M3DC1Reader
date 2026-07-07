@@ -336,3 +336,51 @@ end
     @test res_u.babs1d !== nothing
     @test res_u.phi_rz === nothing
 end
+
+@testitem "reduce_axisym_slice fsa_method=:cumulative (analytic correctness)" begin
+    # Same circular fixture as the q1d test: bowl ψ=(ξ-ξ0)²+(η-η0)² ⇒ circular
+    # surfaces, constant F=I0 and a constant Te field. The cumulative W′/V′
+    # estimator must (a) reproduce a constant exactly and (b) match the analytic
+    # ⟨|B|⟩ = √(I0²+4·ψ1s·ρ²)/R0. (The smoothness advantage over :bin is a
+    # shot-noise-regime property of sparse/irregular REAL data — on this dense,
+    # well-sampled synthetic grid :bin is already smooth — so it is asserted in
+    # the gated real-data cross-validation against :imas, not here.)
+    norm = M3DNormalization(b0 = 1.0e4, n0 = 1.0e14, l0 = 100.0, ion_mass = 2.0)
+    ep = reshape([1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0], 10, 1)
+    ξ0, η0, R0 = 0.2, 0.3, 1.2
+    psi = zeros(80, 1)
+    psi[1, 1] = ξ0^2 + η0^2; psi[2, 1] = -2ξ0; psi[3, 1] = -2η0
+    psi[4, 1] = 1.0;         psi[6, 1] = 1.0
+    I0 = 4.0
+    Ic = zeros(80, 1); Ic[1, 1] = I0
+    te = zeros(80, 1); te[1, 1] = 3.0                # constant Te (M3D units)
+    fields = Dict{Symbol, Matrix{Float64}}(:psi => psi, :I => Ic, :te => te)
+    ψ1s = 0.04
+    Rg = collect(range(0.95, 1.45, length = 100))
+    Zg = collect(range(0.05, 0.55, length = 100))
+    idm = build_grid_to_element_map(Rg, Zg, ep)
+    args = (fields, ep, 1, norm, 0.0, ψ1s, R0, η0, 0.0, Rg, Zg, idm)
+
+    res_bin = reduce_axisym_slice(args...; nbins = 64, fsa_method = :bin)
+    res_cum = reduce_axisym_slice(args...; nbins = 64, fsa_method = :cumulative)
+
+    # (a) constant field ⇒ cumulative FSA is the constant wherever defined
+    f_te = unit_factor(norm, :temperature; system = :si)
+    cvals = filter(isfinite, res_cum.te)
+    @test !isempty(cvals)
+    @test all(v -> isapprox(v, 3.0 * f_te; rtol = 2.0e-3), cvals)
+
+    # (b) ⟨|B|⟩ matches the analytic circular profile (interior nodes)
+    ρ = res_cum.rho
+    b_an = [sqrt(I0^2 + 4 * ψ1s * r^2) / R0 for r in ρ]
+    mB = isfinite.(res_cum.babs1d) .& (ρ .> 0.1) .& (ρ .< 0.9)
+    @test count(mB) ≥ 20
+    @test maximum(abs.((res_cum.babs1d[mB] .- b_an[mB]) ./ b_an[mB])) < 0.02
+
+    # :bin path is untouched (still returns a profile on the same fixture)
+    @test res_bin.babs1d !== nothing
+    @test count(isfinite, res_bin.babs1d) ≥ 20
+
+    # invalid method is a clear error
+    @test_throws ArgumentError reduce_axisym_slice(args...; nbins = 64, fsa_method = :bogus)
+end

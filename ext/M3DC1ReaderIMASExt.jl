@@ -70,4 +70,72 @@ function M3DC1Reader.to_imas(
     return dd
 end
 
+# Bilinear sample of a field on a regular (R,Z) grid; NaN off-grid or when any
+# corner is NaN (off-mesh). R and Z are the grid nodes (monotone increasing).
+function _bilinear(
+        R::AbstractVector{Float64}, Z::AbstractVector{Float64},
+        F::AbstractMatrix, r::Real, z::Real
+    )
+    (r < R[1] || r > R[end] || z < Z[1] || z > Z[end]) && return NaN
+    i = clamp(searchsortedlast(R, r), 1, length(R) - 1)
+    j = clamp(searchsortedlast(Z, z), 1, length(Z) - 1)
+    hr = R[i + 1] - R[i];  hz = Z[j + 1] - Z[j]
+    tr = hr > 0 ? (r - R[i]) / hr : 0.0
+    tz = hz > 0 ? (z - Z[j]) / hz : 0.0
+    f00 = F[i, j];  f10 = F[i + 1, j];  f01 = F[i, j + 1];  f11 = F[i + 1, j + 1]
+    (isfinite(f00) && isfinite(f10) && isfinite(f01) && isfinite(f11)) || return NaN
+    return (1 - tr) * (1 - tz) * f00 + tr * (1 - tz) * f10 +
+        (1 - tr) * tz * f01 + tr * tz * f11
+end
+
+function M3DC1Reader.fsa_imas(
+        eq::M3DC1Reader.M3DAxisymField, field_rz::AbstractMatrix,
+        R::AbstractVector, Z::AbstractVector;
+        wall_r = Float64[], wall_z = Float64[], clip = (0.02, 0.995)
+    )
+    M3DC1Reader._assert_native(eq)
+    size(field_rz) == (length(R), length(Z)) ||
+        error("fsa_imas: field_rz must be (length(R), length(Z)) matching eq's grid")
+
+    # ρ_pol = √ψ_N for every node (the full returned grid). The IMAS tracer aborts
+    # the WHOLE call if ANY surface fails, and the axis-degenerate innermost
+    # surfaces (ψ_N→0) and the separatrix (ψ_N→1, open at the X-point) are exactly
+    # those that fail on a real diverted equilibrium — so only the interior band
+    # `clip` is traced; clipped nodes return NaN.
+    ψ0 = Float64(eq.psi_axis);  ψ1 = Float64(eq.psi_boundary)
+    psin = [(Float64(p) - ψ0) / (ψ1 - ψ0) for p in eq.psi1d]
+    ρ = [sqrt(clamp(x, 0.0, 1.0)) for x in psin]
+    keep = [i for i in eachindex(psin) if clip[1] <= psin[i] <= clip[2]]
+
+    # Build the equilibrium dd (2D ψ map), seed the magnetic axis from eq.axis so
+    # trace_surfaces need not re-find it, and restrict the 1D ψ/f to the traceable
+    # interior band before tracing.
+    dd = M3DC1Reader.to_imas(eq; trace = false, wall_r = wall_r, wall_z = wall_z)
+    eqt = dd.equilibrium.time_slice[1]
+    eqt.global_quantities.free_boundary = 0
+    eqt.global_quantities.magnetic_axis.r = Float64(eq.axis[1])
+    eqt.global_quantities.magnetic_axis.z = Float64(eq.axis[2])
+    eqt.profiles_1d.psi = Float64.(eq.psi1d[keep])
+    eqt.profiles_1d.f = Float64.(eq.F1d[keep])
+    eqt.profiles_1d.pressure = zeros(length(keep))
+    surfaces = IMAS.trace_surfaces(eqt, collect(Float64, wall_r), collect(Float64, wall_z))
+
+    Rv = collect(Float64, R);  Zv = collect(Float64, Z)
+    avg = fill(NaN, length(psin))
+    for (kk, i) in enumerate(keep)
+        kk <= length(surfaces) || break
+        s = surfaces[kk]
+        isempty(s.r) && continue
+        vals = Vector{Float64}(undef, length(s.r))
+        ok = true
+        @inbounds for m in eachindex(s.r)
+            v = _bilinear(Rv, Zv, field_rz, s.r[m], s.z[m])
+            isfinite(v) || (ok = false; break)
+            vals[m] = v
+        end
+        ok && (avg[i] = IMAS.flux_surface_avg(vals, s))
+    end
+    return (; rho = ρ, avg = avg)
+end
+
 end # module

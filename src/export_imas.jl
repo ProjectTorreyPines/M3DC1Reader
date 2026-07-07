@@ -213,7 +213,7 @@ const _FIELD_QTY = (
 """
     reduce_axisym_slice(fields, ep, nplanes, norm, psi_axis_plane1, psi_lcfs_plane1,
                   xmag, zmag, time_s, Rg_n, Zg_n, id_map;
-                  nbins=128, adj=:linear, kprad_z=-1,
+                  nbins=128, adj=:linear, fsa_method=:bin, fsa_window=4.0, kprad_z=-1,
                   weighted=true, axis_aug=true, sigma_cells=1.5, ntrunc=2.0,
                   xnull=NaN, znull=NaN, xnull2=NaN, znull2=NaN,
                   xlim=NaN, zlim=NaN, xlim2=NaN, zlim2=NaN, wall_rz=nothing)
@@ -246,6 +246,21 @@ coarse grids. `adj` selects the binning kernel (`:linear` default, `:gauss`
 for built-in smoothing with `sigma_cells`/`ntrunc`); see
 [`reduce_1d_psi_func`](@ref).
 
+`fsa_method` selects the estimator for the ratio-type profiles (`te, ne, ti, ni,
+pressure, babs1d, deltab1d`, impurity densities): `:bin` (default) is the
+per-bin kernel average above; `:cumulative` computes the smoother
+`⟨f⟩(ψ)=W′(ψ)/V′(ψ)` from cumulative volume integrals (`_fsa_cumulative`, the
+same integrate-then-differentiate approach that de-noises `q1d`) — it replaces
+the per-bin shot noise (∝1/√samples-per-bin) with the lower density-estimation
+floor, and ignores `adj`/`weighted` (it is inherently volume-weighted). `F1d`,
+`q1d`, `phi1d` are already cumulative and unaffected. `fsa_window` (default 4)
+sets the local-regression window width (∝ grid cells) for `:cumulative` only:
+**smaller preserves sharp edge features (e.g. a pedestal) at the cost of a little
+more noise; larger smooths harder.** The default was tuned against the
+[`fsa_imas`](@ref) contour reference (which does no cross-ψ smoothing) on a real
+SPI slice: `16` over-smooths the ne pedestal by ~4.4%, `4` holds it to ~1.1% at
+negligible extra roughness (below ~6 the `wmin` floor dominates, so 2≈4).
+
 ψ_N (and hence ρ_pol, shared by every profile) uses the O-point and boundary
 flux recomputed **per slice on the n=0 averaged ψ** by [`find_lcfs`](@ref),
 seeded from the stored plane-1 scalars: the axis from `(xmag, zmag)`, the
@@ -261,13 +276,20 @@ the stored plane-1 `psi_axis_plane1` / `psi_lcfs_plane1` flow through as fallbac
         xmag::Real, zmag::Real, time_s::Real,
         Rg_n::AbstractVector, Zg_n::AbstractVector,
         id_map::AbstractMatrix{<:Integer};
-        nbins::Integer = 128, adj::Symbol = :linear, kprad_z::Integer = -1,
+        nbins::Integer = 128, adj::Symbol = :linear, fsa_method::Symbol = :bin,
+        fsa_window::Real = 4.0, kprad_z::Integer = -1,
         weighted::Bool = true, axis_aug::Bool = true,
         sigma_cells::Real = 1.5, ntrunc::Real = 2.0,
         xnull::Real = NaN, znull::Real = NaN,
         xnull2::Real = NaN, znull2::Real = NaN,
         xlim::Real = NaN, zlim::Real = NaN,
         xlim2::Real = NaN, zlim2::Real = NaN, wall_rz = nothing
+    )
+    fsa_method === :bin || fsa_method === :cumulative || throw(
+        ArgumentError(
+            "reduce_axisym_slice: fsa_method must be :bin or :cumulative " *
+                "(:imas is a separate contour reference — see fsa_imas), got $fsa_method"
+        )
     )
     uflux = unit_factor(norm, :magnetic_flux; system = :si)
     ulen = unit_factor(norm, :length; system = :si)
@@ -413,13 +435,20 @@ the stored plane-1 `psi_axis_plane1` / `psi_lcfs_plane1` flow through as fallbac
             @inbounds for i in 1:np_all
                 (isfinite(ρ_all[i]) & isfinite(vv[i])) && (cnt += 1)
             end
-            cnt ≥ 2 ?
+            if cnt < 2
+                nothing
+            elseif fsa_method === :cumulative
+                # smooth W′/V′ estimator (inherently volume-weighted; ignores adj).
+                # fsa_window sets the regression window (∝ grid cells) — smaller
+                # preserves edge pedestals, larger smooths more (see _vprime_cumvol).
+                _fsa_cumulative(ρ_all, vv, w_all, ρgrid; wfac = fsa_window)
+            else
                 reduce_1d_psi_func(
                     ρ_all, vv; psi_grid = ρgrid, adj = adj,
                     weights = weighted ? w_all : nothing,
                     sigma_cells = sigma_cells, ntrunc = ntrunc
-                ) :
-                nothing
+                )
+            end
         end
     end
     reduce_si(vgrid, vpatch, quantity::Symbol) = (
@@ -629,6 +658,48 @@ function _vprime_cumvol(
     return Vp
 end
 
+# Smooth cumulative flux-surface average: ⟨f⟩(ψ) = W′(ψ)/V′(ψ), the
+# volume-weighted FSA written as the ratio of two cumulative-volume derivatives
+# — the same integrate-then-differentiate trick that de-noises q via
+# `_vprime_cumvol`. W(ψ_N)=∫_{ψ'<ψ} f dV and V(ψ_N)=∫_{ψ'<ψ} dV are exact from
+# sorted samples + cumsum; each is differentiated by local quadratic regression,
+# so the per-bin shot noise (∝1/√samples-per-bin) of `reduce_1d_psi_func` is
+# replaced by the far lower density-estimation floor. The Δψ scale and the ρ↔ψ_N
+# Jacobian cancel in the W′/V′ ratio, so both derivatives are taken vs ψ_N with
+# unit scale. `ρ_all` are ρ_pol = √ψ_N sample coordinates; `values`/`w_all` carry
+# NaN for dropped (off-mesh / private-flux) samples. Returns the same
+# (psi_grid, func_bin, den) shape as `reduce_1d_psi_func` (den = V′), or `nothing`
+# when too few confined samples remain (< 25, the regression floor).
+function _fsa_cumulative(
+        ρ_all::AbstractVector, values::AbstractVector,
+        w_all::AbstractVector, ρgrid::AbstractVector; wfac::Real = 4.0
+    )
+    n = length(ρ_all)
+    (n == length(values) && n == length(w_all)) ||
+        error("_fsa_cumulative: ρ/value/weight length mismatch")
+    xs = Float64[];  fw = Float64[];  ww = Float64[]
+    sizehint!(xs, n);  sizehint!(fw, n);  sizehint!(ww, n)
+    @inbounds for i in 1:n
+        ρi = ρ_all[i];  fi = values[i];  wi = w_all[i]
+        (isfinite(ρi) & isfinite(fi) & isfinite(wi)) || continue
+        push!(xs, Float64(ρi)^2)              # ψ_N = ρ_pol²
+        push!(fw, Float64(fi) * Float64(wi))  # f·dV integrand
+        push!(ww, Float64(wi))                # dV integrand
+    end
+    length(xs) ≥ 25 || return nothing
+    p = sortperm(xs)
+    xss = xs[p]
+    Wc = cumsum(fw[p])                          # cumulative ∫ f dV
+    Vc = cumsum(ww[p])                          # cumulative ∫ dV
+    Wp = _vprime_cumvol(xss, Wc, ρgrid, 1.0; wfac = wfac)
+    Vp = _vprime_cumvol(xss, Vc, ρgrid, 1.0; wfac = wfac)
+    func_bin = [
+        (isfinite(Wp[k]) && isfinite(Vp[k]) && Vp[k] > 0) ? Wp[k] / Vp[k] : NaN
+            for k in eachindex(ρgrid)
+    ]
+    return (; psi_grid = collect(Float64, ρgrid), func_bin, den = Vp)
+end
+
 const _OPT_FIELDS = (:te, :ne, :ti, :den, :P)
 
 # Coefficient-row range per field: everything is evaluated at a plane (ζ=0, rows
@@ -675,14 +746,18 @@ _to_mhdsimdb_slice(s::NamedTuple) =
 
 """
     export_imas(file, out_path; slices=list_timeslices(file), nbins=128,
-                ngrid=200, adj=:linear, comment="", recompute_ne=false,
-                cocos=11, pulse=nothing, verbose=false) -> out_path
+                ngrid=200, adj=:linear, fsa_method=:bin, fsa_window=4.0, comment="",
+                recompute_ne=false, cocos=11, pulse=nothing, verbose=false) -> out_path
 
 Compute FSA 1D profiles (Te, ne, Ti, ni, pressure) + the 2D ψ map for `slices`
 and write an OMAS-compatible IMAS HDF5 file at `out_path`. When the KPRAD model
 is active, also exports impurity charge-state densities (neutral + ion[1..Z]) and
 the radiated-power-density profile (`disruption` IDS). Set `recompute_ne=true` to
 overwrite the electron density with the quasi-neutral sum n_main + Σ_iz iz·n_imp,iz.
+
+`fsa_method` picks the ratio-profile estimator: `:bin` (default, per-bin kernel
+average) or `:cumulative` (smoother `W′/V′` cumulative estimator that removes the
+bin-to-bin shot noise). See [`reduce_axisym_slice`](@ref) and [`fsa_imas`](@ref).
 
 When the `:I` field is present, each `equilibrium…profiles_2d.0` also gets the
 axisymmetric field maps `b_field_r/z/tor` and the toroidal-flux map `phi` [T,
@@ -750,7 +825,8 @@ a file lacks are omitted. See `_GLOBAL_SCALARS` for why each dataset was chosen.
 function export_imas(
         file::M3DC1File, out_path::AbstractString;
         slices = list_timeslices(file), nbins::Integer = 128,
-        ngrid::Integer = 200, adj::Symbol = :linear,
+        ngrid::Integer = 200, adj::Symbol = :linear, fsa_method::Symbol = :bin,
+        fsa_window::Real = 4.0,
         comment::AbstractString = "", recompute_ne::Bool = false,
         cocos::Union{Nothing, Integer, Symbol} = 11,
         pulse::Union{Nothing, Integer} = nothing,
@@ -814,7 +890,8 @@ function export_imas(
                 fields, ep, file.nplanes, norm,
                 sl.psi_axis, sl.psi_lcfs, sl.xmag, sl.zmag,
                 sl.time * utime, Rg_n, Zg_n, id_map;
-                nbins = nbins, adj = adj, kprad_z = kprad_z,
+                nbins = nbins, adj = adj, fsa_method = fsa_method,
+                fsa_window = fsa_window, kprad_z = kprad_z,
                 sl.xnull, sl.znull, sl.xnull2, sl.znull2,
                 lim.xlim, lim.zlim, lim.xlim2, lim.zlim2
             )

@@ -267,3 +267,20 @@ end
 function to_mxh end
 function to_geqdsk end
 function to_imas end
+
+"""
+    fsa_imas(eq::M3DAxisymField, field_rz, R, Z; wall_r=Float64[], wall_z=Float64[])
+        -> (rho, avg)
+
+Independent flux-surface average of a 2D field map via IMAS's contour tracer, for
+cross-checking the in-package `:bin` / `:cumulative` estimators
+([`reduce_axisym_slice`](@ref)). `field_rz` is the field sampled on the same
+`(R, Z)` grid as `eq.psi_rz`. Traces the flux surfaces of `eq` with
+`IMAS.trace_surfaces` (one per `eq.psi1d` node), bilinearly samples `field_rz`
+along each surface, and returns `IMAS.flux_surface_avg` at the ρ_pol = √ψ_N
+nodes. Only the interior band `clip = (ψN_lo, ψN_hi)` is traced — the tracer
+aborts on the axis-degenerate innermost surfaces and the (open) separatrix, and
+one failure aborts the whole call — so clipped nodes come back `NaN`. Requires
+the IMAS extension (IMASdd + IMAS loaded); errors otherwise.
+"""
+function fsa_imas end
