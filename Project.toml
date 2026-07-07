@@ -22,11 +22,11 @@ M3DC1ReaderMXHEquilibriumExt = "MXHEquilibrium"
 
 [compat]
 AdaptiveArrayPools = "0.3"
-Dates = "1.10"
+Dates = "1"
 EFIT = "1"
 FastInterpolations = "0.4"
 HDF5 = "0.17"
 IMAS = "7"
 IMASdd = "8"
 MXHEquilibrium = "1"
-julia = "1.10"
+julia = "1.11"
