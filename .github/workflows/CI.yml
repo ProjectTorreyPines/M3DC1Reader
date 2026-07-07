@@ -1,0 +1,74 @@
+name: CI
+
+# The test suite is TestItemRunner-based (test/runtests.jl auto-discovers every
+# @testitem under test/). It runs via Pkg.test, so the dedicated test/Project.toml
+# env (M3DC1Reader dev'd from this checkout, plus HDF5/EFIT/MXHEquilibrium/…) and
+# --check-bounds=yes match a local `cc-julia-test-runner .` run.
+#
+# The bulk of the suite is self-generating (single-element analytic meshes + a
+# synthetic C1.h5 built in tempname()), so it needs no data file. The real-data
+# regression items are gated on M3DC1_TEST_FILE (a multi-GB M3D-C1 run) and
+# self-skip here — CI stays green without them. IMAS/IMASdd items likewise skip
+# (weakdeps, not in test/Project.toml).
+on:
+  push:
+    branches:
+      - master
+    tags: ["*"]
+  pull_request:
+    paths:
+      - "src/**"
+      - "ext/**"
+      - "test/**"
+      - "Project.toml"
+      - ".github/workflows/CI.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/pull/') }}
+
+jobs:
+  test:
+    name: Julia ${{ matrix.version }} - ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ["lts", "1"]        # lts = 1.10 (package compat floor); 1 = latest stable
+        os: [ubuntu-latest, macos-latest]
+        include:
+          # Coverage is OS/version-identical, so upload once from the ubuntu/lts job.
+          - os: ubuntu-latest
+            version: "lts"
+            coverage: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: ${{ matrix.version }}
+
+      - uses: julia-actions/cache@v2
+
+      - uses: julia-actions/julia-buildpkg@v1
+
+      - uses: julia-actions/julia-runtest@v1
+        with:
+          coverage: ${{ matrix.coverage || false }}
+
+      - uses: julia-actions/julia-processcoverage@v1
+        if: ${{ matrix.coverage }}
+        with:
+          # ext/: the EFIT + MXHEquilibrium extensions are exercised by the
+          # synthetic to_geqdsk / to_mxh @testitems (both deps are in test/Project.toml).
+          directories: src,ext
+
+      - uses: codecov/codecov-action@v5
+        if: ${{ matrix.coverage }}
+        with:
+          files: lcov.info
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
