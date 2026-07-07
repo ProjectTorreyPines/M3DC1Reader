@@ -90,10 +90,13 @@ function main(args)
     @info "IMAS export written" out
 
     # Optional: one ASCOT5 input file for a chosen slice (auto-named into the folder).
+    # The plasma_1D background uses the same FSA estimator as the IMAS export
+    # (cumulative by default) so the collision-operator background is de-noised;
+    # the B field itself is the exact FEM field and is unaffected.
     if haskey(opts, "ascot5")
         ts = parse(Int, opts["ascot5"])
-        a5 = write_ascot5(file, ts)
-        @info "ASCOT5 input written" out = a5
+        a5 = write_ascot5(file, ts; fsa_method = fsa_method, fsa_window = fsa_window)
+        @info "ASCOT5 input written" out = a5 fsa_method
     end
 
     return out

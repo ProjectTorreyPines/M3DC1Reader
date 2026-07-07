@@ -212,13 +212,22 @@ _a5_col_i(g, name, v::AbstractVector) = (g[name] = reshape(Int32.(v), 1, :))    
 
 """
     write_ascot5(file, ts, out_path=""; nR=150, nZ=150, nphi=0, nbins=128,
-                 desc="") -> out_path
+                 fsa_method=:bin, fsa_window=4.0, desc="") -> out_path
 
 Write one ASCOT5 input HDF5 for time slice `ts`: `bfield/B_3DS`
 ([`ascot5_bfield`](@ref)), `plasma/plasma_1D` (FSA profiles on ρ_pol, ions =
 main D-like species + fully-stripped KPRAD impurity when active),
 `wall/wall_2D` ([`mesh_boundary_rz`](@ref)) and a zero `efield/E_TC`.
 Markers and options are the ASCOT operator's domain and are not written.
+
+The `bfield` block is the exact FEM field sampled pointwise (no FSA — smooth by
+construction). The `plasma_1D` background (ne/Te/Ti/ni), which drives ASCOT5's
+collision operator, is flux-surface-averaged: `fsa_method` picks the estimator
+(`:bin`, per-bin kernel average; `:cumulative`, the smoother `W′/V′` estimator
+that removes bin-to-bin shot noise — a jagged n_e/T_e would inject unphysical
+noise into ν∝n_e/T_e^{3/2}). `fsa_window` (default 4) tunes the `:cumulative`
+regression width. See [`reduce_axisym_slice`](@ref); `scripts/export_run` passes
+`:cumulative` by default.
 
 `out_path=""` names the file `ascot5_in_<ntimestep>.h5` next to the C1.h5 —
 the step number is what the DB pipeline later uses to match ASCOT output
@@ -229,7 +238,9 @@ field must be filled before an actual ASCOT run.
 function write_ascot5(
         file::M3DC1File, ts::Integer, out_path::AbstractString = "";
         nR::Integer = 150, nZ::Integer = 150, nphi::Integer = 0,
-        margin::Real = 0.02, nbins::Integer = 128, desc::AbstractString = ""
+        margin::Real = 0.02, nbins::Integer = 128,
+        fsa_method::Symbol = :bin, fsa_window::Real = 4.0,
+        desc::AbstractString = ""
     )
     norm = normalization(file)
     bf = ascot5_bfield(file, ts; nR = nR, nZ = nZ, nphi = nphi, margin = margin)
@@ -258,7 +269,8 @@ function write_ascot5(
         sl.psi_axis, sl.psi_lcfs, sl.xmag, sl.zmag,
         sl.time * unit_factor(norm, :time; system = :si),
         Rg_n, Zg_n, idm;
-        nbins = nbins, kprad_z = kz,
+        nbins = nbins, fsa_method = fsa_method, fsa_window = fsa_window,
+        kprad_z = kz,
         sl.xnull, sl.znull, sl.xnull2, sl.znull2,
         lim.xlim, lim.zlim, lim.xlim2, lim.zlim2
     )
