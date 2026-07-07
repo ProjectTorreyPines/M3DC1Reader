@@ -1,3 +1,7 @@
+[![CI](https://github.com/ProjectTorreyPines/M3DC1Reader/actions/workflows/CI.yml/badge.svg)](https://github.com/ProjectTorreyPines/M3DC1Reader/actions/workflows/CI.yml)
+[![codecov](https://codecov.io/github/projecttorreypines/m3dc1reader/graph/badge.svg?token=JDIwgzYKI2)](https://codecov.io/github/projecttorreypines/m3dc1reader)
+[![code style: runic](https://img.shields.io/badge/code_style-%E1%9A%B1%E1%9A%A2%E1%9A%BE%E1%9B%81%E1%9A%B2-black)](https://github.com/fredrikekre/Runic.jl)
+
 # M3DC1Reader.jl
 
 Read M3D-C1 `C1.h5` simulation output and work with its native C¹ reduced
