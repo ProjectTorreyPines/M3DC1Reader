@@ -317,7 +317,7 @@ function main(args)
     pylims = [panel_ylims(sp, profs) for sp in specs]
     ref = length(sel) > 1 ? first(profs) : nothing
 
-    @info "plot_equilibrium" file = h5 slices = length(sel) outdir = outdir field = field profiles = [sp.id for sp in specs]
+    @info "plot_equilibrium: $(length(sel)) slices, field=$field, panels=[$(join([sp.id for sp in specs], ", "))] → $outdir"
     reftime = ref === nothing ? nothing : slices[first(sel)].time
     frame(i) = plot_frame(
         slices[i], ref, wall, specs, pylims;
@@ -326,10 +326,11 @@ function main(args)
     )
 
     pngs = String[]
-    for i in sel
+    for (k, i) in enumerate(sel)
         png = joinpath(outdir, @sprintf("equilibrium_%03d.png", parse(Int, keys_all[i])))
         savefig(frame(i), png);  push!(pngs, png)
-        @info "  wrote" png = basename(png) t_ms = round(slices[i].time * 1.0e3, digits = 3)
+        # one compact line per slice (message-only @info stays single-line)
+        @info @sprintf("  [%d/%d] %s  t=%.3f ms", k, length(sel), basename(png), slices[i].time * 1.0e3)
     end
 
     if make_video && length(sel) > 1
@@ -337,10 +338,12 @@ function main(args)
             frame(i)
         end
         vpath = joinpath(outdir, "equilibrium_evolution.$fmt")
-        (fmt == "mp4" ? mp4 : gif)(anim, vpath; fps = fps)
-        @info "  wrote movie" movie = basename(vpath) fps = fps
+        (fmt == "mp4" ? mp4 : gif)(anim, vpath; fps = fps)   # Plots logs "Saved animation to …"
     end
-    @info "done" pngs = length(pngs) dir = outdir
+    @info @sprintf(
+        "done: %d PNG%s%s → %s", length(pngs), length(pngs) == 1 ? "" : "s",
+        (make_video && length(sel) > 1) ? " + movie" : "", outdir
+    )
     return outdir
 end
 
