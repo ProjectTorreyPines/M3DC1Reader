@@ -1,65 +1,73 @@
 #!/usr/bin/env julia
-# Batch runner: point at an M3D-C1 run folder (or a C1.h5 directly) and write an
-# OMAS/IMAS HDF5 next to it. The multi-GB `time_NNN.h5` slice files are read
-# transparently via C1.h5's external links (resolved relative to C1.h5), so only
-# the folder needs to be on disk.
+# Batch runner: point at an M3D-C1 run folder (or a C1.h5 directly) and write the
+# OMAS/IMAS HDF5 (and, by default, the ASCOT5 inputs) into an output folder. The
+# multi-GB `time_NNN.h5` slice files are read transparently via C1.h5's external
+# links (resolved relative to C1.h5), so only the run folder needs to be on disk.
 #
 # Usage:
-#   julia --project=. scripts/export_run.jl <run_dir | C1.h5> [out.h5] [key=val ...]
+#   julia --project=. scripts/export_run.jl <run_dir | C1.h5> [--key=value ...]
 #
-# Positional:
-#   <run_dir | C1.h5>   folder containing C1.h5, or the C1.h5 path itself
-#   [out.h5]            output path (default: <run_dir>/M3DC1Reader_imas.h5)
+# The only positional argument is the input: a run folder containing C1.h5, or the
+# C1.h5 path itself. Everything else is a --key=value option:
 #
-# key=val options (all optional):
-#   nbins=128           FSA radial bins
-#   ngrid=200           R-Z evaluation grid (ngrid × ngrid)
-#   cocos=11            11 (IMAS) | mhdsimdb (NIMROD-DB drop-in) | raw (per-radian)
-#   fsa=cumulative      ratio-profile FSA estimator: cumulative (smooth, default) | bin (raw)
-#   fsa_window=4        cumulative regression window (smaller = follows pedestal tighter)
-#   pulse=<int>         dataset_description.data_entry.pulse
-#   slices=0,12,24      comma-separated timeslice indices (default: all)
-#   ascot5=all          also write an ASCOT5 input (ascot_input_<idx>.h5) for
-#                       every exported slice, reusing its FSA (default: off)
-#   ascot5_dir=<path>   directory for the ASCOT5 inputs (default: the out.h5 dir)
+#   --outdir=<path>     output folder for ALL outputs (default: <run_dir>, created
+#                       if missing): the IMAS file (M3DC1Reader_imas.h5) and, when
+#                       --ascot=true, the ASCOT5 inputs (ascot_input_<idx>.h5).
+#   --ascot=true        also write an ASCOT5 input per exported slice, reusing its
+#                       FSA (default: true; --ascot=false writes IMAS only)
+#   --nbins=128         FSA radial bins
+#   --ngrid=200         R-Z evaluation grid (ngrid × ngrid)
+#   --cocos=11          11 (IMAS) | mhdsimdb (NIMROD-DB drop-in) | raw (per-radian)
+#   --fsa=cumulative    ratio-profile FSA estimator: cumulative (smooth, default) | bin (raw)
+#   --fsa_window=4      cumulative regression window (smaller = follows pedestal tighter)
+#   --pulse=<int>       dataset_description.data_entry.pulse
+#   --slices=0,12,24    comma-separated timeslice indices (default: all)
 #
-# NOTE: this runner defaults to fsa=cumulative (de-noised ne/Te/dB-over-B profiles).
-# The library `export_imas` default is fsa_method=:bin for backward compatibility;
-# pass `fsa=bin` here to reproduce the raw per-bin estimator. `ascot5=all` writes
-# one ASCOT5 input per exported slice — for a single slice combine with `slices=`.
+# NOTE: this runner defaults to --fsa=cumulative (de-noised ne/Te/dB-over-B
+# profiles). The library `export_imas` default is fsa_method=:bin for backward
+# compatibility; pass --fsa=bin here to reproduce the raw per-bin estimator.
 #
 # Examples:
 #   julia --project=. scripts/export_run.jl /scratch/run_042
-#   julia --project=. scripts/export_run.jl /scratch/run_042 out.h5 nbins=256 pulse=200123
-#   julia --project=. scripts/export_run.jl /scratch/run_042 ascot5=all          # +ASCOT5 every slice
-#   julia --project=. scripts/export_run.jl /scratch/run_042 slices=24 ascot5=all # +ASCOT5 slice 24 only
-#   julia --project=. scripts/export_run.jl /scratch/run_042 fsa=bin             # raw profiles
+#   julia --project=. scripts/export_run.jl /scratch/run_042 --outdir=/scratch/out
+#   julia --project=. scripts/export_run.jl /scratch/run_042 --outdir=/scratch/out --slices=24
+#   julia --project=. scripts/export_run.jl /scratch/run_042 --ascot=false
+#   julia --project=. scripts/export_run.jl /scratch/run_042 --fsa=bin
 
 using M3DC1Reader
 
 function main(args)
-    isempty(args) && error(
-        "usage: export_run.jl <run_dir | C1.h5> [out.h5] [nbins= ngrid= cocos= fsa= slices= pulse= ascot5=all]"
-    )
-
-    # Split positionals from key=val options.
-    positional = String[]
+    # One positional (the input); everything else is a --key=value option.
+    input = ""
     opts = Dict{String, String}()
     for a in args
-        if occursin('=', a)
-            k, v = split(a, '='; limit = 2)
-            opts[k] = v
+        if startswith(a, "--")
+            kv = a[3:end]
+            if occursin('=', kv)
+                k, v = split(kv, '='; limit = 2)
+                opts[String(k)] = String(v)
+            else
+                opts[kv] = "true"          # bare flag, e.g. --ascot
+            end
+        elseif isempty(input)
+            input = a
         else
-            push!(positional, a)
+            error("unexpected positional '$a' — options use --key=value")
         end
     end
+    isempty(input) && error(
+        "usage: export_run <run_dir | C1.h5> [--outdir=<path>] [--ascot=true|false] " *
+            "[--nbins= --ngrid= --cocos= --fsa= --fsa_window= --slices= --pulse=]"
+    )
 
-    input = positional[1]
     # Resolve the C1.h5 path: accept either a folder or the file itself.
     c1 = isdir(input) ? joinpath(input, "C1.h5") : input
     isfile(c1) || error("no C1.h5 found at: $c1")
     rundir = dirname(abspath(c1))
-    out = length(positional) ≥ 2 ? positional[2] : joinpath(rundir, "M3DC1Reader_imas.h5")
+    # Output folder holds both the IMAS file and the ASCOT5 inputs (default: rundir).
+    out_folder = get(opts, "outdir", rundir)
+    mkpath(out_folder)
+    out = joinpath(out_folder, "M3DC1Reader_imas.h5")
 
     # Parse options with defaults matching export_imas.
     nbins = parse(Int, get(opts, "nbins", "128"))
@@ -71,34 +79,33 @@ function main(args)
             error("cocos must be 11 | mhdsimdb | raw, got $c")
     end
     # This runner defaults to the smooth cumulative estimator (the library default
-    # is :bin); pass fsa=bin to opt back into the raw per-bin profiles.
+    # is :bin); pass --fsa=bin to opt back into the raw per-bin profiles.
     fsa_method = let m = get(opts, "fsa", "cumulative")
         m == "cumulative" ? :cumulative : m == "bin" ? :bin :
             error("fsa must be cumulative | bin, got $m")
     end
     fsa_window = parse(Float64, get(opts, "fsa_window", "4"))
-    # ASCOT5 emission now rides along the export loop (one input per slice, reusing
-    # each slice's FSA); it follows `slices`, so for a single slice use slices=N.
-    ascot5 = let a = get(opts, "ascot5", "off")
-        a in ("all", "on", "true", "yes") ? true :
-            a in ("off", "false", "no") ? false :
-            error("ascot5 must be all|off — it now follows `slices` (for one slice use `slices=N ascot5=all`), got $a")
+    # ASCOT5 emission (one input per exported slice, reusing each slice's FSA) is
+    # ON by default; --ascot=false writes only the IMAS file.
+    ascot5 = let a = get(opts, "ascot", "true")
+        a in ("true", "on", "yes", "1") ? true :
+            a in ("false", "off", "no", "0") ? false :
+            error("--ascot must be true|false, got $a")
     end
-    ascot5_dir = get(opts, "ascot5_dir", "")
 
     file = M3DC1File(c1)
     all_slices = list_timeslices(file)
     slices = haskey(opts, "slices") ?
         parse.(Int, split(opts["slices"], ',')) : all_slices
 
-    @info "M3DC1Reader export" run = rundir c1 = c1 out = out slices = length(slices) nbins ngrid cocos pulse fsa_method fsa_window ascot5
+    @info "M3DC1Reader export" run = rundir out_folder = out_folder slices = length(slices) nbins ngrid cocos pulse fsa_method fsa_window ascot5
 
     export_imas(
         file, out;
         slices = slices, nbins = nbins, ngrid = ngrid,
         cocos = cocos, pulse = pulse,
         fsa_method = fsa_method, fsa_window = fsa_window,
-        ascot5 = ascot5, ascot5_dir = ascot5_dir, verbose = true
+        ascot5 = ascot5, ascot5_dir = out_folder, verbose = true
     )
 
     return out
