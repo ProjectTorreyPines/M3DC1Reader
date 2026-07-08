@@ -316,8 +316,11 @@ end
 # ascot_input_024.h5). No digit may abut the `ascot` prefix: the DB pipeline's
 # step-from-filename parsers read the first digits after `ascot` as the MHD-time
 # key, so `ascot5_…` would parse as step 5. ntimestep is kept in `desc`.
-_ascot5_default_path(file::M3DC1File, ts::Integer) =
-    joinpath(dirname(String(file.path)), "ascot_input_$(lpad(ts, 3, '0')).h5")
+# `dir` overrides the output directory (default: next to the C1.h5); the basename
+# is always `ascot_input_<idx>.h5` (index-based, for pipeline matching).
+_ascot5_default_path(file::M3DC1File, ts::Integer; dir::AbstractString = "") =
+    joinpath(isempty(dir) ? dirname(String(file.path)) : String(dir),
+        "ascot_input_$(lpad(ts, 3, '0')).h5")
 
 _ascot5_default_desc(file::M3DC1File, ts::Integer, bf) =
     "M3DC1Reader $(basename(String(file.path))) slice $ts (ntimestep=$(bf.nstep), t=$(bf.time) s)"

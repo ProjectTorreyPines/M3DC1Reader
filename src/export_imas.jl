@@ -750,7 +750,7 @@ _to_mhdsimdb_slice(s::NamedTuple) =
     export_imas(file, out_path; slices=list_timeslices(file), nbins=128,
                 ngrid=200, adj=:linear, fsa_method=:bin, fsa_window=4.0, comment="",
                 recompute_ne=false, cocos=11, pulse=nothing,
-                ascot5=false, ascot5_nphi=0, verbose=false) -> out_path
+                ascot5=false, ascot5_nphi=0, ascot5_dir="", verbose=false) -> out_path
 
 Compute FSA 1D profiles (Te, ne, Ti, ni, pressure) + the 2D ψ map for `slices`
 and write an OMAS-compatible IMAS HDF5 file at `out_path`. When the KPRAD model
@@ -763,11 +763,12 @@ average) or `:cumulative` (smoother `W′/V′` cumulative estimator that remove
 bin-to-bin shot noise). See [`reduce_axisym_slice`](@ref) and [`fsa_imas`](@ref).
 
 `ascot5=true` additionally writes one ASCOT5 input HDF5 per exported slice
-(`ascot_input_<idx>.h5` next to the C1.h5, via [`write_ascot5`](@ref)), **reusing
-each slice's FSA** — so the ASCOT5 `plasma_1D` background is identical to the IMAS
-`core_profiles` and is not recomputed. Only the 3D `B_3DS` field is computed
-fresh (the axisymmetric export never produces it). `ascot5_nphi` sets its
-toroidal resolution (`0` → `4·nplanes`).
+(`ascot_input_<idx>.h5`, via [`write_ascot5`](@ref)), **reusing each slice's FSA**
+— so the ASCOT5 `plasma_1D` background is identical to the IMAS `core_profiles`
+and is not recomputed. Only the 3D `B_3DS`/`E_3D` fields are computed fresh (the
+axisymmetric export never produces them). `ascot5_nphi` sets the field toroidal
+resolution (`0` → `4·nplanes`); `ascot5_dir` sets the output directory (default:
+the IMAS output's directory, created if new — the basename stays index-based).
 
 When the `:I` field is present, each `equilibrium…profiles_2d.0` also gets the
 axisymmetric field maps `b_field_r/z/tor` and the toroidal-flux map `phi` [T,
@@ -841,6 +842,7 @@ function export_imas(
         cocos::Union{Nothing, Integer, Symbol} = 11,
         pulse::Union{Nothing, Integer} = nothing,
         ascot5::Bool = false, ascot5_nphi::Integer = 0,
+        ascot5_dir::AbstractString = "",
         verbose::Bool = false
     )
     cocos === nothing || cocos == 11 || cocos === :mhdsimdb ||
@@ -891,6 +893,11 @@ function export_imas(
     t_warm = t_start                    # ETA baseline; reset after slice 1 (compile)
     kw = ndigits(nsl)                   # column widths (we know nsl and every ts up front)
     tw = isempty(slices) ? 1 : maximum(ndigits, slices)
+    # ASCOT5 output dir: explicit ascot5_dir, else next to the IMAS output (which
+    # for the default out_path is the run folder = next to C1.h5). Created if new.
+    a5dir = !isempty(ascot5_dir) ? String(ascot5_dir) :
+        let d = dirname(String(out_path)); isempty(d) ? dirname(String(file.path)) : d end
+    ascot5 && mkpath(a5dir)
     for (isl, ts) in enumerate(slices)
         t_sl = time()
         # One open per slice reads ψ + every optional field together into the
@@ -919,7 +926,7 @@ function export_imas(
         # so it cannot be reused (it dominates the per-slice cost either way).
         if ascot5
             bf = ascot5_bfield(file, ts; nphi = ascot5_nphi, efield = true)
-            apath = _ascot5_default_path(file, ts)
+            apath = _ascot5_default_path(file, ts; dir = a5dir)
             _write_ascot5_hdf5(
                 apath, file, ep, norm, kprad_z, bf, res,
                 _ascot5_default_desc(file, ts, bf)

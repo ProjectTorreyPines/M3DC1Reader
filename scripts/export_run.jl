@@ -21,6 +21,7 @@
 #   slices=0,12,24      comma-separated timeslice indices (default: all)
 #   ascot5=all          also write an ASCOT5 input (ascot_input_<idx>.h5) for
 #                       every exported slice, reusing its FSA (default: off)
+#   ascot5_dir=<path>   directory for the ASCOT5 inputs (default: the out.h5 dir)
 #
 # NOTE: this runner defaults to fsa=cumulative (de-noised ne/Te/dB-over-B profiles).
 # The library `export_imas` default is fsa_method=:bin for backward compatibility;
@@ -83,6 +84,7 @@ function main(args)
             a in ("off", "false", "no") ? false :
             error("ascot5 must be all|off — it now follows `slices` (for one slice use `slices=N ascot5=all`), got $a")
     end
+    ascot5_dir = get(opts, "ascot5_dir", "")
 
     file = M3DC1File(c1)
     all_slices = list_timeslices(file)
@@ -96,7 +98,7 @@ function main(args)
         slices = slices, nbins = nbins, ngrid = ngrid,
         cocos = cocos, pulse = pulse,
         fsa_method = fsa_method, fsa_window = fsa_window,
-        ascot5 = ascot5, verbose = true
+        ascot5 = ascot5, ascot5_dir = ascot5_dir, verbose = true
     )
 
     return out
