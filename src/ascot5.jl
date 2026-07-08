@@ -249,19 +249,11 @@ function write_ascot5(
     )
     norm = normalization(file)
     bf = ascot5_bfield(file, ts; nR = nR, nZ = nZ, nphi = nphi, margin = margin)
-    if isempty(out_path)
-        # Name by the zero-padded slice INDEX, mirroring M3D-C1's `time_%03d.h5`
-        # so inputs pair 1:1 with their source slice (time_024.h5 ↔
-        # ascot_input_024.h5). No digit may abut the `ascot` prefix: the DB
-        # pipeline's step-from-filename parsers read the first digits after
-        # `ascot` as the MHD-time key, so `ascot5_…` would parse as step 5.
-        # ntimestep is kept in `desc`, not the filename.
-        out_path = joinpath(dirname(file.path), "ascot_input_$(lpad(ts, 3, '0')).h5")
-    end
-    isempty(desc) &&
-        (desc = "M3DC1Reader $(basename(file.path)) slice $ts (ntimestep=$(bf.nstep), t=$(bf.time) s)")
+    isempty(out_path) && (out_path = _ascot5_default_path(file, ts))
+    isempty(desc) && (desc = _ascot5_default_desc(file, ts, bf))
 
-    # FSA background plasma on the shared ρ_pol grid
+    # FSA background plasma on its own ρ_pol grid (standalone path). When called
+    # from export_imas the per-slice FSA is reused instead — see there.
     ep = elems_plane(file)
     Rg_n = collect(range(extrema(ep[5, :])..., length = 120))
     Zg_n = collect(range(extrema(ep[6, :])..., length = 120))
@@ -286,6 +278,31 @@ function write_ascot5(
         sl.xnull, sl.znull, sl.xnull2, sl.znull2,
         lim.xlim, lim.zlim, lim.xlim2, lim.zlim2
     )
+    return _write_ascot5_hdf5(out_path, file, ep, norm, kz, bf, prof, desc)
+end
+
+# Default output path: name by the zero-padded slice INDEX, mirroring M3D-C1's
+# `time_%03d.h5` so inputs pair 1:1 with their source slice (time_024.h5 ↔
+# ascot_input_024.h5). No digit may abut the `ascot` prefix: the DB pipeline's
+# step-from-filename parsers read the first digits after `ascot` as the MHD-time
+# key, so `ascot5_…` would parse as step 5. ntimestep is kept in `desc`.
+_ascot5_default_path(file::M3DC1File, ts::Integer) =
+    joinpath(dirname(String(file.path)), "ascot_input_$(lpad(ts, 3, '0')).h5")
+
+_ascot5_default_desc(file::M3DC1File, ts::Integer, bf) =
+    "M3DC1Reader $(basename(String(file.path))) slice $ts (ntimestep=$(bf.nstep), t=$(bf.time) s)"
+
+# Shared ASCOT5 HDF5 writer. Given a precomputed B-field `bf` ([`ascot5_bfield`])
+# and FSA plasma profiles `prof` (a [`reduce_axisym_slice`] result — SI `.ne`,
+# `.te`, `.ti`, `.ni`, `.imp_dens`, `.rho`), fill + floor the profiles, pick the
+# ion species, and write the a5py-layout file. Both `write_ascot5` (standalone,
+# 120² grid) and `export_imas` (reusing its per-slice `res` on the export grid)
+# call this, so the `plasma_1D` block is byte-identical between the two pipelines.
+function _write_ascot5_hdf5(
+        out_path::AbstractString, file::M3DC1File, ep::AbstractMatrix,
+        norm::M3DNormalization, kz::Integer, bf, prof, desc::AbstractString
+    )
+    nR = length(bf.Rg);  nZ = length(bf.Zg)
 
     # nearest-finite fill + positivity floor (plasma_1D must be finite > 0)
     function _fillprof(v, floor_)
@@ -305,7 +322,7 @@ function write_ascot5(
     ti = _fillprof(prof.ti !== nothing ? prof.ti : prof.te, 1.0)
     ni = _fillprof(prof.ni !== nothing ? prof.ni : prof.ne, 1.0e6)
     (ne === nothing || te === nothing) &&
-        error("write_ascot5: ne/te FSA profiles unavailable for slice $ts")
+        error("write_ascot5: ne/te FSA profiles unavailable")
 
     # ion species: main D-like ion + total KPRAD impurity (fully-stripped
     # charge assumed — the collision operator needs one Z per species)

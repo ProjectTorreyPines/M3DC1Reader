@@ -19,23 +19,26 @@
 #   fsa_window=4        cumulative regression window (smaller = follows pedestal tighter)
 #   pulse=<int>         dataset_description.data_entry.pulse
 #   slices=0,12,24      comma-separated timeslice indices (default: all)
-#   ascot5=<ts>         also write an ASCOT5 input for slice <ts> into the folder
+#   ascot5=all          also write an ASCOT5 input (ascot_input_<idx>.h5) for
+#                       every exported slice, reusing its FSA (default: off)
 #
 # NOTE: this runner defaults to fsa=cumulative (de-noised ne/Te/dB-over-B profiles).
 # The library `export_imas` default is fsa_method=:bin for backward compatibility;
-# pass `fsa=bin` here to reproduce the raw per-bin estimator.
+# pass `fsa=bin` here to reproduce the raw per-bin estimator. `ascot5=all` writes
+# one ASCOT5 input per exported slice — for a single slice combine with `slices=`.
 #
 # Examples:
 #   julia --project=. scripts/export_run.jl /scratch/run_042
 #   julia --project=. scripts/export_run.jl /scratch/run_042 out.h5 nbins=256 pulse=200123
-#   julia --project=. scripts/export_run.jl /scratch/run_042 slices=0,24 ascot5=24
-#   julia --project=. scripts/export_run.jl /scratch/run_042 fsa=bin       # raw profiles
+#   julia --project=. scripts/export_run.jl /scratch/run_042 ascot5=all          # +ASCOT5 every slice
+#   julia --project=. scripts/export_run.jl /scratch/run_042 slices=24 ascot5=all # +ASCOT5 slice 24 only
+#   julia --project=. scripts/export_run.jl /scratch/run_042 fsa=bin             # raw profiles
 
 using M3DC1Reader
 
 function main(args)
     isempty(args) && error(
-        "usage: export_run.jl <run_dir | C1.h5> [out.h5] [nbins= ngrid= cocos= pulse= slices= ascot5=]"
+        "usage: export_run.jl <run_dir | C1.h5> [out.h5] [nbins= ngrid= cocos= fsa= slices= pulse= ascot5=all]"
     )
 
     # Split positionals from key=val options.
@@ -73,31 +76,29 @@ function main(args)
             error("fsa must be cumulative | bin, got $m")
     end
     fsa_window = parse(Float64, get(opts, "fsa_window", "4"))
+    # ASCOT5 emission now rides along the export loop (one input per slice, reusing
+    # each slice's FSA); it follows `slices`, so for a single slice use slices=N.
+    ascot5 = let a = get(opts, "ascot5", "off")
+        a in ("all", "on", "true", "yes") ? true :
+            a in ("off", "false", "no") ? false :
+            error("ascot5 must be all|off — it now follows `slices` (for one slice use `slices=N ascot5=all`), got $a")
+    end
 
     file = M3DC1File(c1)
     all_slices = list_timeslices(file)
     slices = haskey(opts, "slices") ?
         parse.(Int, split(opts["slices"], ',')) : all_slices
 
-    @info "M3DC1Reader export" run = rundir c1 = c1 out = out slices = length(slices) nbins ngrid cocos pulse fsa_method fsa_window
+    @info "M3DC1Reader export" run = rundir c1 = c1 out = out slices = length(slices) nbins ngrid cocos pulse fsa_method fsa_window ascot5
 
     export_imas(
         file, out;
         slices = slices, nbins = nbins, ngrid = ngrid,
         cocos = cocos, pulse = pulse,
-        fsa_method = fsa_method, fsa_window = fsa_window, verbose = true
+        fsa_method = fsa_method, fsa_window = fsa_window,
+        ascot5 = ascot5, verbose = true
     )
-    @info "IMAS export written" out
-
-    # Optional: one ASCOT5 input file for a chosen slice (auto-named into the folder).
-    # The plasma_1D background uses the same FSA estimator as the IMAS export
-    # (cumulative by default) so the collision-operator background is de-noised;
-    # the B field itself is the exact FEM field and is unaffected.
-    if haskey(opts, "ascot5")
-        ts = parse(Int, opts["ascot5"])
-        a5 = write_ascot5(file, ts; fsa_method = fsa_method, fsa_window = fsa_window)
-        @info "ASCOT5 input written" out = a5 fsa_method
-    end
+    @info "IMAS export written" out ascot5
 
     return out
 end

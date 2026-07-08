@@ -747,7 +747,8 @@ _to_mhdsimdb_slice(s::NamedTuple) =
 """
     export_imas(file, out_path; slices=list_timeslices(file), nbins=128,
                 ngrid=200, adj=:linear, fsa_method=:bin, fsa_window=4.0, comment="",
-                recompute_ne=false, cocos=11, pulse=nothing, verbose=false) -> out_path
+                recompute_ne=false, cocos=11, pulse=nothing,
+                ascot5=false, ascot5_nphi=0, verbose=false) -> out_path
 
 Compute FSA 1D profiles (Te, ne, Ti, ni, pressure) + the 2D ψ map for `slices`
 and write an OMAS-compatible IMAS HDF5 file at `out_path`. When the KPRAD model
@@ -758,6 +759,13 @@ overwrite the electron density with the quasi-neutral sum n_main + Σ_iz iz·n_i
 `fsa_method` picks the ratio-profile estimator: `:bin` (default, per-bin kernel
 average) or `:cumulative` (smoother `W′/V′` cumulative estimator that removes the
 bin-to-bin shot noise). See [`reduce_axisym_slice`](@ref) and [`fsa_imas`](@ref).
+
+`ascot5=true` additionally writes one ASCOT5 input HDF5 per exported slice
+(`ascot_input_<idx>.h5` next to the C1.h5, via [`write_ascot5`](@ref)), **reusing
+each slice's FSA** — so the ASCOT5 `plasma_1D` background is identical to the IMAS
+`core_profiles` and is not recomputed. Only the 3D `B_3DS` field is computed
+fresh (the axisymmetric export never produces it). `ascot5_nphi` sets its
+toroidal resolution (`0` → `4·nplanes`).
 
 When the `:I` field is present, each `equilibrium…profiles_2d.0` also gets the
 axisymmetric field maps `b_field_r/z/tor` and the toroidal-flux map `phi` [T,
@@ -830,6 +838,7 @@ function export_imas(
         comment::AbstractString = "", recompute_ne::Bool = false,
         cocos::Union{Nothing, Integer, Symbol} = 11,
         pulse::Union{Nothing, Integer} = nothing,
+        ascot5::Bool = false, ascot5_nphi::Integer = 0,
         verbose::Bool = false
     )
     cocos === nothing || cocos == 11 || cocos === :mhdsimdb ||
@@ -885,17 +894,29 @@ function export_imas(
         )
         push!(nsteps, sl.nstep)
         fields = sl.fields
-        push!(
-            results, reduce_axisym_slice(
-                fields, ep, file.nplanes, norm,
-                sl.psi_axis, sl.psi_lcfs, sl.xmag, sl.zmag,
-                sl.time * utime, Rg_n, Zg_n, id_map;
-                nbins = nbins, adj = adj, fsa_method = fsa_method,
-                fsa_window = fsa_window, kprad_z = kprad_z,
-                sl.xnull, sl.znull, sl.xnull2, sl.znull2,
-                lim.xlim, lim.zlim, lim.xlim2, lim.zlim2
-            )
+        res = reduce_axisym_slice(
+            fields, ep, file.nplanes, norm,
+            sl.psi_axis, sl.psi_lcfs, sl.xmag, sl.zmag,
+            sl.time * utime, Rg_n, Zg_n, id_map;
+            nbins = nbins, adj = adj, fsa_method = fsa_method,
+            fsa_window = fsa_window, kprad_z = kprad_z,
+            sl.xnull, sl.znull, sl.xnull2, sl.znull2,
+            lim.xlim, lim.zlim, lim.xlim2, lim.zlim2
         )
+        push!(results, res)
+        # Optional ASCOT5 input per slice, reusing THIS slice's FSA (`res`) so the
+        # plasma_1D background is byte-identical to the IMAS core_profiles. Only the
+        # 3D B-field is computed fresh — the axisymmetric export never produces it,
+        # so it cannot be reused (it dominates the per-slice cost either way).
+        if ascot5
+            bf = ascot5_bfield(file, ts; nphi = ascot5_nphi)
+            apath = _ascot5_default_path(file, ts)
+            _write_ascot5_hdf5(
+                apath, file, ep, norm, kprad_z, bf, res,
+                _ascot5_default_desc(file, ts, bf)
+            )
+            verbose && @info "  ascot5 input written" out = basename(apath)
+        end
         verbose && @info "  slice [$isl/$nsl] ts=$ts done" ntimestep = sl.nstep t_ms = round(sl.time * utime * 1.0e3, digits = 4) elapsed_s = round(time() - t_sl, digits = 2)
     end
     verbose && @info "export_imas: FSA done for $nsl slices in $(round(time() - t_start, digits = 1)) s; assembling IR + writing…"

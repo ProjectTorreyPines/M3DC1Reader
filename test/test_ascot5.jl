@@ -72,3 +72,47 @@ end
         rm(out; force = true)
     end
 end
+
+# Integrated pipeline: export_imas(ascot5=true) writes one ASCOT5 input per slice
+# reusing that slice's FSA, so the ASCOT5 plasma_1D background must be IDENTICAL
+# to the IMAS core_profiles (not just close). Same real-C1.h5 gate as above.
+@testitem "export_imas ascot5=true reuses FSA (plasma_1D == core_profiles)" begin
+    using HDF5
+    c1 = get(ENV, "M3DC1_TEST_FILE", "/scratch/gpfs/myoo/m3d_smoke/C1.h5")
+    if !isfile(c1)
+        @info "skipping ascot5 integration e2e (no C1.h5 at $c1)"
+    else
+        file = M3DC1File(c1)
+        ts = last(list_timeslices(file))
+        apath = joinpath(dirname(abspath(c1)), "ascot_input_$(lpad(ts, 3, '0')).h5")
+        imas_out = tempname() * ".h5"
+        preexisting = isfile(apath)          # never delete a user's real ascot file
+        try
+            export_imas(
+                file, imas_out; slices = [ts], fsa_method = :cumulative,
+                ascot5 = true, ascot5_nphi = 8, verbose = false
+            )
+            @test isfile(apath)              # ascot input named by slice index
+
+            ine, ite = h5open(imas_out) do f
+                g = f["core_profiles"]["profiles_1d"]["0"]   # single slice → index 0
+                vec(read(g["electrons"]["density"])), vec(read(g["electrons"]["temperature"]))
+            end
+            ane, ate = h5open(apath) do f
+                g = f["plasma"][only(keys(f["plasma"]))]
+                vec(read(g["edensity"])), vec(read(g["etemperature"]))
+            end
+            @test length(ane) == length(ine)
+            mne = isfinite.(ine) .& isfinite.(ane)
+            @test count(mne) > 10
+            # reused FSA ⇒ bit-identical where IMAS is finite (ascot only fills
+            # NaNs + applies a positivity floor real profiles never hit)
+            @test all(i -> ine[i] == ane[i], findall(mne))
+            mte = isfinite.(ite) .& isfinite.(ate)
+            @test all(i -> ite[i] == ate[i], findall(mte))
+        finally
+            rm(imas_out; force = true)
+            preexisting || rm(apath; force = true)
+        end
+    end
+end
