@@ -918,7 +918,7 @@ function export_imas(
         # 3D B-field is computed fresh — the axisymmetric export never produces it,
         # so it cannot be reused (it dominates the per-slice cost either way).
         if ascot5
-            bf = ascot5_bfield(file, ts; nphi = ascot5_nphi)
+            bf = ascot5_bfield(file, ts; nphi = ascot5_nphi, efield = true)
             apath = _ascot5_default_path(file, ts)
             _write_ascot5_hdf5(
                 apath, file, ep, norm, kprad_z, bf, res,

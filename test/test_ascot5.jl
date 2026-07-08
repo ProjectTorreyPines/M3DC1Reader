@@ -66,8 +66,16 @@ end
             @test Int(read(g["nelements"])[1]) == length(wr) > 20
             @test all(x -> 0.5 < x < 10.0, wr)
 
-            g = f["efield"][only(keys(f["efield"]))]
-            @test vec(read(g["exyz"])) == zeros(3)
+            # efield is now the total MHD E as E_3D (M3D-C1 stores E_R/E_PHI/E_Z)
+            ekey = only(keys(f["efield"]))
+            @test startswith(ekey, "E_3D")
+            g = f["efield"][ekey]
+            @test (Int(read(g["nr"])[1]), Int(read(g["nphi"])[1]), Int(read(g["nz"])[1])) == (60, 16, 60)
+            er = read(g["er"])
+            @test size(er) == (60, 16, 60)                 # disk (nz,nphi,nr)
+            erf = filter(isfinite, vec(er))
+            @test count(isfinite, vec(er)) / length(er) > 0.5   # mesh covers most of bbox
+            @test maximum(abs, erf) < 1.0e7                # sane V/m magnitude (not blown up)
         end
         rm(out; force = true)
     end

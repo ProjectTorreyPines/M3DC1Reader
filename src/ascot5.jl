@@ -34,7 +34,7 @@ function _collapse_zeta(coef::AbstractMatrix, ζ::Real; dphi::Bool = false)
 end
 
 """
-    ascot5_bfield(file, ts; nR=150, nZ=150, nphi=0) -> NamedTuple
+    ascot5_bfield(file, ts; nR=150, nZ=150, nphi=0, efield=false) -> NamedTuple
 
 Assemble the ASCOT5 `B_3DS` field data for one time slice, in SI units:
 
@@ -50,6 +50,11 @@ Assemble the ASCOT5 `B_3DS` field data for one time slice, in SI units:
 - `br`, `bz` [T] (nR×nphi×nZ): **perturbation only** — B_3DS's convention is
   that the equilibrium poloidal field is reconstructed from ∇ψ, so the n=0
   part is subtracted here. `bphi` [T] is the total toroidal field.
+- `er`, `ephi`, `ez` [V/m] (nR×nphi×nZ): the **total** electric field from
+  M3D-C1's stored `E_R`/`E_PHI`/`E_Z` (evaluated as values, not gradients),
+  returned only when `efield=true` and those datasets exist (else `nothing`).
+  Unlike B_3DS there is no equilibrium reconstruction to pair with (ASCOT5's
+  E_3D is standalone), so E is written in full — no n=0 subtraction.
 
 The 3D field is evaluated from the exact FEM representation
 `B = ∇ψ×∇φ + F∇φ − ∇⊥f′` at each φ node via [`_collapse_zeta`](@ref)
@@ -60,7 +65,7 @@ to the caller/operator for now (see docs/ascot5_writer.md §fill).
 function ascot5_bfield(
         file::M3DC1File, ts::Integer;
         nR::Integer = 150, nZ::Integer = 150, nphi::Integer = 0,
-        margin::Real = 0.02
+        margin::Real = 0.02, efield::Bool = false
     )
     nplanes = file.nplanes
     npp = file.npp
@@ -69,6 +74,7 @@ function ascot5_bfield(
     ulen = unit_factor(norm, :length; system = :si)
     ub = unit_factor(norm, :magnetic_field; system = :si)
     uflux = unit_factor(norm, :magnetic_flux; system = :si)
+    ue = unit_factor(norm, :electric_field; system = :si)   # V/m = v0·b0 (fusion-io Phi0/L0)
 
     ep = elems_plane(file)
     Rb, Zb = mesh_boundary_rz(ep)
@@ -94,6 +100,14 @@ function ascot5_bfield(
     psi3 = sl.fields[:psi];  I3 = sl.fields[:I]
     fprime = _fprime_stored(file)
     f3 = _try_field(file, ts, fprime ? :fp : :f; rows = Colon())
+
+    # Electric field (E_3D). M3D-C1 stores E_R/E_PHI/E_Z directly as value fields
+    # (same 80-coef Hermite blocks); only read when requested and present, else the
+    # writer falls back to a zero E_TC. These are the TOTAL field — no n=0 split.
+    ER3 = efield ? _try_field(file, ts, :E_R; rows = Colon()) : nothing
+    EP3 = efield ? _try_field(file, ts, :E_PHI; rows = Colon()) : nothing
+    EZ3 = efield ? _try_field(file, ts, :E_Z; rows = Colon()) : nothing
+    have_E = ER3 !== nothing && EP3 !== nothing && EZ3 !== nothing
 
     # n=0 ψ map + axis/separatrix flux (same recipe as reduce_axisym_slice)
     psi_av = average_toroidal_axisymmetric(psi3, nplanes)
@@ -124,6 +138,9 @@ function ascot5_bfield(
     br = fill(NaN, nR, nphi, nZ)
     bphi = fill(NaN, nR, nphi, nZ)
     bz = fill(NaN, nR, nphi, nZ)
+    er = have_E ? fill(NaN, nR, nphi, nZ) : nothing
+    ephi = have_E ? fill(NaN, nR, nphi, nZ) : nothing
+    ez = have_E ? fill(NaN, nR, nphi, nZ) : nothing
     for (j, φ) in enumerate(phis)
         p = min(floor(Int, φ / Δφ) + 1, nplanes)
         ζ = φ - (p - 1) * Δφ
@@ -150,6 +167,18 @@ function ascot5_bfield(
             bz[i, j, k] = (bzt - (pg0.dR[i, k] / R)) * ub
             bphi[i, j, k] = (Iv[i, k] / R) * ub
         end
+        if have_E
+            # E is a stored value field (not a gradient); total field, written in
+            # full. Same φ-collapse + on-grid value evaluation as I, ×V/m factor.
+            ERv = interpolate_axisym_to_grid(_collapse_zeta(view(ER3, :, cols), ζ), ep, Rg_n, Zg_n; id_map = id_map)
+            EPv = interpolate_axisym_to_grid(_collapse_zeta(view(EP3, :, cols), ζ), ep, Rg_n, Zg_n; id_map = id_map)
+            EZv = interpolate_axisym_to_grid(_collapse_zeta(view(EZ3, :, cols), ζ), ep, Rg_n, Zg_n; id_map = id_map)
+            @inbounds for k in 1:nZ, i in 1:nR
+                er[i, j, k] = ERv[i, k] * ue
+                ephi[i, j, k] = EPv[i, k] * ue
+                ez[i, j, k] = EZv[i, k] * ue
+            end
+        end
     end
 
     return (;
@@ -159,6 +188,7 @@ function ascot5_bfield(
         psi0 = ψ0 * uflux, psi1 = ψ1 * uflux,
         axisr = R_ax * ulen, axisz = Z_ax * ulen,
         br = br, bphi = bphi, bz = bz,
+        er = er, ephi = ephi, ez = ez,        # total E [V/m], or nothing if not requested/absent
         bphi0_rz = (I0v ./ Rg_n) .* ub,       # n=0 Bφ map (for diagnostics)
         time = sl.time * unit_factor(norm, :time; system = :si),
         nstep = sl.nstep,
@@ -248,7 +278,7 @@ function write_ascot5(
         desc::AbstractString = ""
     )
     norm = normalization(file)
-    bf = ascot5_bfield(file, ts; nR = nR, nZ = nZ, nphi = nphi, margin = margin)
+    bf = ascot5_bfield(file, ts; nR = nR, nZ = nZ, nphi = nphi, margin = margin, efield = true)
     isempty(out_path) && (out_path = _ascot5_default_path(file, ts))
     isempty(desc) && (desc = _ascot5_default_desc(file, ts, bf))
 
@@ -383,9 +413,24 @@ function _write_ascot5_hdf5(
         _a5_col(g, "r", Rb .* ulen);  _a5_col(g, "z", Zb .* ulen)
         _a5_col_i(g, "flag", zeros(Int32, length(Rb)))
 
-        # ---- efield/E_TC (zero field) ----
-        g = _a5_group(f, "efield", "E_TC"; desc = desc)
-        _a5_col(g, "exyz", zeros(3))
+        # ---- efield: E_3D (total MHD E from M3D-C1) when available, else a zero
+        # E_TC (a5py's recommended "no electric field" input). E_3D scalar keys are
+        # UNprefixed (unlike B_3DS's b_*); er/ephi/ez land disk (nz,nphi,nr) like br.
+        if bf.er !== nothing
+            g = _a5_group(f, "efield", "E_3D"; desc = desc)
+            _a5_scalar(g, "rmin", bf.Rg[1]);    _a5_scalar(g, "rmax", bf.Rg[end])
+            _a5_scalar_i(g, "nr", nR)
+            _a5_scalar(g, "zmin", bf.Zg[1]);    _a5_scalar(g, "zmax", bf.Zg[end])
+            _a5_scalar_i(g, "nz", nZ)
+            _a5_scalar(g, "phimin", 0.0);       _a5_scalar(g, "phimax", 360.0)
+            _a5_scalar_i(g, "nphi", length(bf.phi_deg))
+            g["er"] = bf.er                     # disk (nz,nphi,nr)
+            g["ephi"] = bf.ephi
+            g["ez"] = bf.ez
+        else
+            g = _a5_group(f, "efield", "E_TC"; desc = desc)
+            _a5_col(g, "exyz", zeros(3))
+        end
     end
     return String(out_path)
 end
