@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Equilibrium viewer for the IMAS HDF5 written by export_run / export_imas.
+# Draws the poloidal ψ map (LCFS bold, O-point, X-point, wall) per time slice
+# and stitches an MP4 of the evolution. Run it like an executable:
+#
+#   scripts/plot_equilibrium <imas.h5 | folder> [--outdir= --format=mp4|gif --fps= --slices= --field=]
+#
+# NOTE: plotting needs Plots + HDF5, which live in your DEFAULT Julia
+# environment, NOT the M3DC1Reader package project (a data reader with no
+# plotting deps). So this runs julia WITHOUT --project. If your default env
+# lacks them, add once:  julia -e 'using Pkg; Pkg.add(["Plots","HDF5"])'
+# Override the env with M3DC1_VIZ_PROJECT=@myenv scripts/plot_equilibrium ...
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+if ! command -v julia >/dev/null 2>&1; then
+    module load julia 2>/dev/null || true
+fi
+if ! command -v julia >/dev/null 2>&1; then
+    echo "plot_equilibrium: 'julia' not found — edit the Julia setup block in $0" >&2
+    exit 1
+fi
+
+if [[ -n "${M3DC1_VIZ_PROJECT:-}" ]]; then
+    exec julia --project="$M3DC1_VIZ_PROJECT" "$SCRIPT_DIR/plot_equilibrium.jl" "$@"
+else
+    exec julia "$SCRIPT_DIR/plot_equilibrium.jl" "$@"   # default (global) env
+fi
