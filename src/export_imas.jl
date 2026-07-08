@@ -896,7 +896,9 @@ function export_imas(
     # ASCOT5 output dir: explicit ascot5_dir, else next to the IMAS output (which
     # for the default out_path is the run folder = next to C1.h5). Created if new.
     a5dir = !isempty(ascot5_dir) ? String(ascot5_dir) :
-        let d = dirname(String(out_path)); isempty(d) ? dirname(String(file.path)) : d end
+        let d = dirname(String(out_path))
+            isempty(d) ? dirname(String(file.path)) : d
+    end
     ascot5 && mkpath(a5dir)
     for (isl, ts) in enumerate(slices)
         t_sl = time()
