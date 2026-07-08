@@ -12,7 +12,7 @@
 #
 #   --outdir=<path>     output folder for ALL outputs (default: <run_dir>, created
 #                       if missing): the axisymmetric OMAS file (M3DC1_axisym.h5)
-#                       and, when --ascot=true, the ASCOT5 inputs (ascot_input_<idx>.h5).
+#                       and, when --ascot=true, the ASCOT5 inputs (ascot/ascot_input_<idx>.h5).
 #   --ascot=true        also write an ASCOT5 input per exported slice, reusing its
 #                       FSA (default: true; --ascot=false writes IMAS only)
 #   --nbins=128         FSA radial bins
@@ -66,7 +66,8 @@ function main(args)
     c1 = isdir(input) ? joinpath(input, "C1.h5") : input
     isfile(c1) || error("no C1.h5 found at: $c1")
     rundir = dirname(abspath(c1))
-    # Output folder holds both the IMAS file and the ASCOT5 inputs (default: rundir).
+    # Output folder holds the axisymmetric OMAS file; the ASCOT5 inputs go in an
+    # `ascot/` subfolder to keep it tidy (default out folder: rundir).
     out_folder = get(opts, "outdir", rundir)
     mkpath(out_folder)
     # Axisymmetric OMAS/IMAS-DD output (the n=0 FSA reduction; the 3D fields go to
@@ -113,7 +114,7 @@ function main(args)
         slices = slices, nbins = nbins, ngrid = ngrid,
         cocos = cocos, pulse = pulse,
         fsa_method = fsa_method, fsa_window = fsa_window,
-        ascot5 = ascot5, ascot5_dir = out_folder, verbose = true
+        ascot5 = ascot5, ascot5_dir = joinpath(out_folder, "ascot"), verbose = true
     )
 
     return out

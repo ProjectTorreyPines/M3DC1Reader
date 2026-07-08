@@ -3,7 +3,8 @@
 # export_run. Each frame packs the 2D picture and the key 1D profiles side by side:
 #
 #   • LEFT  — poloidal ψ map (coloured by normalized flux ψ_N) with the LCFS in
-#     bold, the magnetic axis (O-point), the recomputed X-point(s) and the wall.
+#     bold, the magnetic axis (O-point), the recomputed X-point(s), the wall, and
+#     — when the export carries them — the pellet / SPI-fragment (R,Z) locations.
 #   • RIGHT — the main core_profiles 1D traces vs ρ_pol: nₑ, Tₑ/Tᵢ, q, and the
 #     total impurity density (or δB/B when there is no impurity). A faint dashed
 #     line shows the first frame as a reference so the evolution is obvious.
@@ -25,7 +26,7 @@
 # folder containing `M3DC1_axisym.h5` (the old `M3DC1Reader_imas.h5` name still
 # works). Options are all --key=value:
 #
-#   --outdir=<path>   where to write the PNGs/video (default: <input folder>/equilibrium_plots)
+#   --outdir=<path>   where to write the PNGs/video (default: <input folder>/axisym_fields_plots)
 #   --video=true      also write a time-evolution movie when >1 slice (default: true)
 #   --format=mp4      movie container: mp4 (default, compact + smooth) | gif
 #   --fps=8           movie frame rate (default: 8)
@@ -67,6 +68,29 @@ function read_wall(f)
     r = read(f["$p/r"]);  z = read(f["$p/z"])
     (isempty(r) || length(r) != length(z)) && return nothing
     return (R = vcat(r, r[1]), Z = vcat(z, z[1]))     # close the polygon
+end
+
+"""
+Pellet / SPI-fragment (R,Z) positions for slice `key` — one point per pellet from
+`pellets/time_slice/<key>/pellet/<ip>/path_profiles/position`. Returns an empty
+vector when the file predates this field (only added to exports on 2026-07-08) or
+has no pellet model, so old files just plot without markers.
+"""
+function read_pellet_positions(f, key)
+    base = "pellets/time_slice/$key/pellet"
+    haskey(f, base) || return NTuple{2, Float64}[]
+    pg = f[base]
+    pts = NTuple{2, Float64}[]
+    for k in sort(collect(keys(pg)); by = s -> parse(Int, s))
+        p = "$k/path_profiles/position"
+        (haskey(pg, "$p/r") && haskey(pg, "$p/z")) || continue
+        r = read(pg["$p/r"]);  z = read(pg["$p/z"])
+        (isempty(r) || isempty(z)) && continue
+        r1 = Float64(first(r));  z1 = Float64(first(z))
+        (isfinite(r1) && isfinite(z1)) || continue
+        push!(pts, (r1, z1))
+    end
+    return pts
 end
 
 "The 1D core_profiles traces for slice `key`, vs ρ_pol; `nothing` if absent."
@@ -124,6 +148,7 @@ function read_slice(f, key)
             Z = _scalar(g, "global_quantities/magnetic_axis/z"),
         ),
         xpoints = xpts, time = _scalar(g, "time"),
+        pellets = read_pellet_positions(f, key),
         prof = read_profiles(f, key),
     )
 end
@@ -171,7 +196,7 @@ function panel_1d(spec, prof, ref, ylims)
         yr = _series_y(ref, acc)
         yr === nothing || plot!(
             p, ref.rho, yr .* sc;         # faint first-frame ref
-            c = col, alpha = 0.25, ls = :dash, lw = 1, label = ""
+            c = col, alpha = 0.5, ls = :dash, lw = 1, label = ""
         )
         y = _series_y(prof, acc)
         y === nothing || plot!(
@@ -183,7 +208,9 @@ function panel_1d(spec, prof, ref, ylims)
 end
 
 # ── 2D equilibrium panel ──────────────────────────────────────────────────────
-function panel_2d(s, wall; field, xlims, ylims, clims, ctitle, title = "")
+# `trail` is the pellet (R,Z) positions from earlier slices (oldest first); drawn
+# as a fading comet-tail under the current markers so the motion is visible.
+function panel_2d(s, wall; field, xlims, ylims, clims, ctitle, title = "", trail = Vector{NTuple{2, Float64}}[])
     if field == :psi
         C = s.psi
         lcfs = s.psi_boundary
@@ -220,6 +247,26 @@ function panel_2d(s, wall; field, xlims, ylims, clims, ctitle, title = "")
         plt, first.(s.xpoints), last.(s.xpoints);
         marker = :xcross, ms = 8, c = :cyan, markerstrokewidth = 3, label = "X-point"
     )
+    # fading comet-tail: pellet positions from earlier slices, older = fainter, so
+    # the (sampled) trajectory reads at a glance under the current markers.
+    nt = length(trail)
+    for (j, past) in enumerate(trail)
+        isempty(past) && continue
+        a = 0.1 + 0.3 * (j / max(nt, 1))               # ramp toward the present
+        scatter!(
+            plt, first.(past), last.(past);
+            marker = :circle, ms = 2.2, c = :magenta, alpha = a,
+            markerstrokewidth = 0, label = "", colorbar_entry = false
+        )
+    end
+    # pellet / SPI-fragment locations at this slice (magenta stands out on viridis);
+    # many fragments for SPI, so small markers with a thin dark edge for definition.
+    isempty(s.pellets) || scatter!(
+        plt, first.(s.pellets), last.(s.pellets);
+        marker = :diamond, ms = 3.5, c = :magenta,
+        markerstrokecolor = :black, markerstrokewidth = 0.4,
+        label = length(s.pellets) == 1 ? "pellet" : "SPI ($(length(s.pellets)))"
+    )
     plot!(
         plt; legend = :topleft, legendfontsize = 6,
         foreground_color_legend = nothing, background_color_legend = RGBA(1, 1, 1, 0.6)
@@ -228,16 +275,16 @@ function panel_2d(s, wall; field, xlims, ylims, clims, ctitle, title = "")
 end
 
 # ── one composed frame (2D + 1D panels) ───────────────────────────────────────
-function plot_frame(s, ref, wall, specs, pylims; idx, field, xlims, ylims, clims, ctitle, reftime = nothing)
+function plot_frame(s, ref, wall, specs, pylims; idx, field, xlims, ylims, clims, ctitle, reftime = nothing, trail = Vector{NTuple{2, Float64}}[])
     base = @sprintf("slice %d      t = %.3f ms", idx, s.time * 1.0e3)
     isempty(specs) &&                                  # no core_profiles → 2D only
-        return panel_2d(s, wall; field, xlims, ylims, clims, ctitle, title = base)
+        return panel_2d(s, wall; field, xlims, ylims, clims, ctitle, title = base, trail = trail)
 
     # The dashed curve in every 1D panel is the first frame — note it in the title
     # (only present when there is more than one slice).
     suptitle = reftime === nothing ? base :
         base * @sprintf("        (dashed = initial, t = %.3f ms)", reftime * 1.0e3)
-    p2d = panel_2d(s, wall; field, xlims, ylims, clims, ctitle)
+    p2d = panel_2d(s, wall; field, xlims, ylims, clims, ctitle, trail = trail)
     p1d = [panel_1d(specs[k], s.prof, ref, pylims[k]) for k in eachindex(specs)]
     n = length(specs)
     # The 2D map is aspect-locked (tall + narrow), so it only needs a slim column;
@@ -274,7 +321,7 @@ function main(args)
     end
     isempty(input) && error(
         "usage: plot_equilibrium <imas.h5 | folder> " *
-            "[--outdir= --video=true|false --format=mp4|gif --fps= --slices= --field=psi_norm|psi]"
+            "[--outdir= --video=true|false --format=mp4|gif --fps= --slices= --field=psi_norm|psi --trail=true|false]"
     )
 
     # A folder resolves to the default export name (fall back to the old name so
@@ -286,13 +333,15 @@ function main(args)
         isfile(cand) ? cand : joinpath(input, "M3DC1Reader_imas.h5")
     end
     isfile(h5) || error("no OMAS/IMAS HDF5 found in: $input")
-    outdir = get(opts, "outdir", joinpath(dirname(abspath(h5)), "equilibrium_plots"))
+    outdir = get(opts, "outdir", joinpath(dirname(abspath(h5)), "axisym_fields_plots"))
     mkpath(outdir)
     make_video = get(opts, "video", "true") in ("true", "on", "yes", "1")
     fmt = get(opts, "format", "mp4")
     fmt in ("mp4", "gif") || error("--format must be mp4 | gif, got $fmt")
     fps = parse(Int, get(opts, "fps", "8"))
     field = get(opts, "field", "psi_norm") == "psi" ? :psi : :psi_norm
+    # draw each pellet's earlier-slice positions as a fading comet-tail (on by default)
+    show_trail = get(opts, "trail", "true") in ("true", "on", "yes", "1")
 
     keys_all, wall, slices = h5open(h5, "r") do f
         haskey(f, "equilibrium/time_slice") ||
@@ -327,25 +376,33 @@ function main(args)
 
     @info "plot_equilibrium: $(length(sel)) slices, field=$field, panels=[$(join([sp.id for sp in specs], ", "))] → $outdir"
     reftime = ref === nothing ? nothing : slices[first(sel)].time
-    frame(i) = plot_frame(
-        slices[i], ref, wall, specs, pylims;
-        idx = parse(Int, keys_all[i]), field = field,
-        xlims = xlims, ylims = ylims, clims = clims, ctitle = ctitle, reftime = reftime
-    )
+    # frame k renders selected slice sel[k], trailed by the pellet positions of all
+    # earlier selected slices (the fading comet-tail) when --trail is on.
+    function frame(k)
+        i = sel[k]
+        trail = show_trail ? [slices[sel[m]].pellets for m in 1:(k - 1)] :
+            Vector{NTuple{2, Float64}}[]
+        return plot_frame(
+            slices[i], ref, wall, specs, pylims;
+            idx = parse(Int, keys_all[i]), field = field,
+            xlims = xlims, ylims = ylims, clims = clims, ctitle = ctitle,
+            reftime = reftime, trail = trail
+        )
+    end
 
     pngs = String[]
     for (k, i) in enumerate(sel)
-        png = joinpath(outdir, @sprintf("equilibrium_%03d.png", parse(Int, keys_all[i])))
-        savefig(frame(i), png);  push!(pngs, png)
+        png = joinpath(outdir, @sprintf("axisym_fields_%03d.png", parse(Int, keys_all[i])))
+        savefig(frame(k), png);  push!(pngs, png)
         # one compact line per slice (message-only @info stays single-line)
         @info @sprintf("  [%d/%d] %s  t=%.3f ms", k, length(sel), basename(png), slices[i].time * 1.0e3)
     end
 
     if make_video && length(sel) > 1
-        anim = @animate for i in sel
-            frame(i)
+        anim = @animate for k in eachindex(sel)
+            frame(k)
         end
-        vpath = joinpath(outdir, "equilibrium_evolution.$fmt")
+        vpath = joinpath(outdir, "axisym_fields_evolution.$fmt")
         (fmt == "mp4" ? mp4 : gif)(anim, vpath; fps = fps)   # Plots logs "Saved animation to …"
     end
     @info @sprintf(

@@ -1,0 +1,224 @@
+#!/usr/bin/env bash
+# Batch-scan M3D-C1 run folders → OMAS export (+ASCOT5 inputs) + equilibrium plots.
+#
+# For each run folder (one containing C1.h5) it writes ALL outputs into
+#     $OUTBASE/<basename of run folder>        e.g.  .../MHD_DB/C1_76095/
+# using scripts/export_run (→ M3DC1_axisym.h5 + ascot/ascot_input_<idx>.h5), then renders
+# the equilibrium+profiles frames/movie there via scripts/plot_equilibrium
+# (→ <outdir>/axisym_fields_plots/).
+#
+# Usage:
+#   scripts/scan_export <run_folder|parent|C1.h5|list.txt> [more ...]
+#   scripts/scan_export /scratch/gpfs/myoo/runs/C1_*     # let the shell glob folders
+#   scripts/scan_export /scratch/gpfs/myoo/runs          # scan subfolders for C1.h5
+#   scripts/scan_export runs.txt                         # read the folders from a list file
+#   scripts/scan_export                                  # scan the current directory
+#
+# Each argument may be a run folder (has C1.h5), a C1.h5 file, a parent dir (its
+# immediate subfolders that contain C1.h5 are processed), or a LIST FILE — any
+# non-.h5 text file with one run path per line ('#' comments and blank lines
+# ignored; a leading '~/' is expanded; each path is itself resolved as a run
+# folder / C1.h5 / parent, but list files cannot nest).
+#
+# Config via environment variables (all optional):
+#   OUTBASE      output root                     (default: /scratch/gpfs/myoo/MHD_DB)
+#   EXPORT_OPTS  extra flags for export_run      (e.g. "--cocos=11 --slices=0,24")
+#   PLOT_OPTS    extra flags for plot_equilibrium(e.g. "--fps=12 --format=gif")
+#   DO_EXPORT    1|0 run the export step         (default: 1)
+#   DO_PLOT      1|0 run the plot step           (default: 1)
+#   FORCE        1 re-run even if outputs exist  (default: 0 = resume/skip existing)
+#   DRYRUN       1 preview reads/writes, run nothing   (or pass -n / --dry-run)
+#   RANK/NRANKS  manual shard (worker r of N); normally auto-detected from SLURM
+#
+# Parallel across SLURM: the resolved run list is sharded round-robin over NRANKS
+# workers — worker r handles the runs whose index % NRANKS == r. NRANKS/RANK are
+# auto-detected from `srun` (SLURM_PROCID/SLURM_NTASKS) or a job array
+# (SLURM_ARRAY_TASK_ID/_COUNT); with neither it is a single rank (does everything).
+# Each run writes to its own $OUTBASE/<name>, so workers never collide. Launch e.g.
+#   srun --label -n 8 scripts/scan_export runs.txt         # 8 ranks in one allocation
+# or a job array — see scripts/scan_export.slurm for a ready template. Preview the
+# split with no SLURM:   NRANKS=8 scripts/scan_export -n runs.txt
+#
+# A failure on one folder does NOT stop the scan; a per-rank summary is printed at
+# the end and the exit code is non-zero if any of this rank's folders failed.
+
+set -uo pipefail
+shopt -s nullglob
+
+[[ "${1:-}" == "-h" || "${1:-}" == "--help" ]] &&
+    { awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "$0"; exit 0; }
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+OUTBASE="${OUTBASE:-/scratch/gpfs/myoo/MHD_DB}"
+EXPORT_OPTS="${EXPORT_OPTS:-}"
+PLOT_OPTS="${PLOT_OPTS:-}"
+DO_EXPORT="${DO_EXPORT:-1}"
+DO_PLOT="${DO_PLOT:-1}"
+FORCE="${FORCE:-0}"
+DRYRUN="${DRYRUN:-0}"
+
+# Parallel sharding: which worker am I, of how many? Manual RANK/NRANKS wins;
+# else auto-detect srun tasks, then a job array; else a single rank of one.
+if [[ -n "${NRANKS:-}" || -n "${RANK:-}" ]]; then
+    RANK="${RANK:-0}";  NRANKS="${NRANKS:-1}"                          # manual override
+elif [[ -n "${SLURM_PROCID:-}" && -n "${SLURM_NTASKS:-}" ]]; then
+    RANK="$SLURM_PROCID";  NRANKS="$SLURM_NTASKS"                       # srun -n N
+elif [[ -n "${SLURM_ARRAY_TASK_ID:-}" && -n "${SLURM_ARRAY_TASK_COUNT:-}" ]]; then
+    RANK=$((SLURM_ARRAY_TASK_ID - ${SLURM_ARRAY_TASK_MIN:-0}))          # sbatch --array
+    NRANKS="$SLURM_ARRAY_TASK_COUNT"
+else
+    RANK=0;  NRANKS=1
+fi
+(( NRANKS >= 1 )) || NRANKS=1
+
+# --- resolve the list of run folders from the arguments (or CWD) -------------
+# Missing / unreadable / C1.h5-less entries are always skipped with a WARN (never
+# fatal), so one bad line in a big list can't sink the batch.
+_add_run() {   # append run dir $1 as an absolute path; skip + warn if unreadable
+    local p; p="$(cd "$1" 2>/dev/null && pwd)"
+    if [[ -n "$p" ]]; then runs+=("$p")
+    else echo "scan_export: WARN skipping '$1' (unreadable / gone)" >&2; fi
+}
+
+# Append the run folder(s) that `$1` resolves to onto the global `runs` array.
+# `$2`=1 allows reading `$1` as a list file; 0 forbids it (used for the lines
+# inside a list file, so list files cannot nest).
+add_path() {
+    local a="$1" allow_manifest="$2" sub line tilde='~' before
+    if [[ -f "$a" && "$(basename "$a")" == "C1.h5" ]]; then
+        _add_run "$(dirname "$a")"                               # a C1.h5 file
+    elif [[ -d "$a" && -f "$a/C1.h5" ]]; then
+        _add_run "$a"                                            # a run folder
+    elif [[ -d "$a" ]]; then
+        before=${#runs[@]}
+        for sub in "$a"/*/; do                                   # a parent: scan 1 level
+            [[ -f "${sub}C1.h5" ]] && _add_run "${sub%/}"
+        done
+        [[ ${#runs[@]} -eq "$before" ]] &&
+            echo "scan_export: WARN skipping '$a' (no C1.h5 in it or its subfolders)" >&2
+    elif [[ -f "$a" && "$allow_manifest" == "1" && "$a" != *.h5 ]]; then
+        while IFS= read -r line || [[ -n "$line" ]]; do          # a list file
+            line="${line%%#*}"                                   # strip comment
+            line="${line#"${line%%[![:space:]]*}"}"              # ltrim
+            line="${line%"${line##*[![:space:]]}"}"              # rtrim
+            [[ -z "$line" ]] && continue
+            [[ "${line:0:2}" == "$tilde/" ]] && line="$HOME/${line:2}"  # expand leading ~
+            add_path "$line" 0                                   # resolve; no nested lists
+        done < "$a"
+    else
+        echo "scan_export: WARN skipping '$a' (missing / not a folder / C1.h5 / parent / list file)" >&2
+    fi
+}
+
+if [[ $# -gt 0 ]]; then args=("$@"); else args=("."); fi
+runs=()
+for a in "${args[@]}"; do
+    case "$a" in
+        -n | --dry-run) DRYRUN=1; continue ;;    # preview only, run nothing
+    esac
+    add_path "$a" 1
+done
+
+[[ ${#runs[@]} -eq 0 ]] && {
+    echo "scan_export: no run folders with C1.h5 found in: ${args[*]}" >&2
+    echo "  · a run folder must contain C1.h5 DIRECTLY (not nested deeper)" >&2
+    echo "  · a parent dir is scanned only ONE level down" >&2
+    echo "  · a list file needs one EXISTING run path per line (use absolute paths)" >&2
+    exit 1
+}
+
+# de-duplicate, preserving order (bash 3.2-safe: no associative arrays)
+uniq=(); seen_list=""
+for r in "${runs[@]}"; do
+    case "$seen_list" in
+        *"|$r|"*) ;;
+        *) uniq+=("$r"); seen_list="$seen_list|$r|" ;;
+    esac
+done
+runs=("${uniq[@]}")
+
+N=${#runs[@]}
+[[ "$DRYRUN" == "1" ]] &&
+    echo "scan_export: DRY RUN — resolving inputs/outputs only, nothing is written"
+rbanner=""; [[ "$NRANKS" -gt 1 ]] && rbanner="  [rank $RANK/$NRANKS]"
+echo "scan_export: $N run(s) → $OUTBASE$rbanner   (export=$DO_EXPORT plot=$DO_PLOT force=$FORCE dryrun=$DRYRUN)"
+[[ "$NRANKS" -eq 1 ]] && printf '  %s\n' "${runs[@]}"
+
+# --- process each ------------------------------------------------------------
+ok=(); fail=(); gi=0
+for run in "${runs[@]}"; do
+    gi=$((gi + 1))                        # 1-based index for display
+    assigned=$(( (gi - 1) % NRANKS ))     # 0-based worker that owns this run
+    # in a real (non-dry) run each worker handles only its own share
+    [[ "$DRYRUN" != "1" && "$assigned" -ne "$RANK" ]] && continue
+
+    name="$(basename "$run")"
+    outdir="$OUTBASE/$name"
+
+    # decide what each step would do (identical logic for dry-run and real run)
+    if [[ "$DO_EXPORT" != "1" ]]; then ex="off"
+    elif [[ "$FORCE" != "1" && -f "$outdir/M3DC1_axisym.h5" ]]; then ex="skip"
+    else ex="run"; fi
+    plots="$outdir/axisym_fields_plots"
+    if [[ "$DO_PLOT" != "1" ]]; then pl="off"
+    elif [[ "$FORCE" != "1" && -d "$plots" && -n "$(ls -A "$plots" 2>/dev/null)" ]]; then pl="skip"
+    else pl="run"; fi
+
+    ptag=""; [[ "$NRANKS" -gt 1 ]] && ptag="  → rank $assigned"
+    echo
+    echo "== [$gi/$N] $name$ptag =="
+    echo "   read : $run/C1.h5"
+    echo "   write: $outdir/   (export=$ex, plot=$pl)"
+
+    if [[ "$DRYRUN" == "1" ]]; then       # preview only — show the exact commands
+        [[ "$ex" == "run" ]] &&
+            echo "     export_run $run --outdir=$outdir $EXPORT_OPTS"
+        [[ "$pl" == "run" ]] &&
+            echo "     plot_equilibrium $outdir $PLOT_OPTS"
+        ok+=("$name")
+        continue
+    fi
+
+    mkdir -p "$outdir"
+    step_failed=0
+    case "$ex" in
+        run)
+            echo "  export: $run"
+            # shellcheck disable=SC2086  # intentional: split EXPORT_OPTS into separate flags
+            "$SCRIPT_DIR/export_run" "$run" --outdir="$outdir" $EXPORT_OPTS \
+                || { echo "  export: FAILED" >&2; step_failed=1; } ;;
+        skip) echo "  export: skip (M3DC1_axisym.h5 exists; set FORCE=1 to redo)" ;;
+    esac
+
+    if [[ $step_failed -eq 0 ]]; then
+        case "$pl" in
+            run)
+                echo "  plot: $outdir"
+                # shellcheck disable=SC2086  # intentional: split PLOT_OPTS into separate flags
+                "$SCRIPT_DIR/plot_equilibrium" "$outdir" $PLOT_OPTS \
+                    || { echo "  plot: FAILED" >&2; step_failed=1; } ;;
+            skip) echo "  plot: skip (axisym_fields_plots/ exists; set FORCE=1 to redo)" ;;
+        esac
+    fi
+
+    if [[ $step_failed -eq 0 ]]; then ok+=("$name"); else fail+=("$name"); fi
+done
+
+# --- summary -----------------------------------------------------------------
+echo
+if [[ "$DRYRUN" == "1" ]]; then
+    msg="dry run: previewed $N run(s)"
+    [[ "$NRANKS" -gt 1 ]] && msg="$msg, sharded round-robin across $NRANKS ranks"
+    echo "== $msg =="
+    exit 0
+fi
+if [[ "$NRANKS" -gt 1 ]]; then
+    echo "== rank $RANK/$NRANKS done: ${#ok[@]} ok, ${#fail[@]} failed (this rank's share) =="
+else
+    echo "== done: ${#ok[@]}/$N ok, ${#fail[@]} failed =="
+fi
+if [[ ${#fail[@]} -gt 0 ]]; then
+    printf '  FAILED: %s\n' "${fail[@]}"
+    exit 1
+fi
+exit 0

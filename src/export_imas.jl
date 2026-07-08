@@ -802,7 +802,8 @@ IDS carries the M3D-C1 mesh boundary as the limiter outline
 ([`mesh_boundary_rz`](@ref) — usable as an ASCOT5 wall); when the run has a
 pellet model (`/pellet` root group, [`read_pellets`](@ref)), the `pellets`
 IDS gets per-slice, per-pellet `path_profiles.{ablation_rate,
-ablated_particles, distance}`, `shape.size`, `velocity_initial`, and the
+ablated_particles, distance, position.{r,z,phi}}`, `shape.size`,
+`velocity_initial`, and the
 two-species list `species.0 = D` / `species.1 = KPRAD impurity` split by
 `pellet_mix` (the NIMROD SPI layout); recomputed X-points
 land in `equilibrium…boundary.x_point[*]`; `pulse` (when given) fills
@@ -1052,7 +1053,10 @@ end
 # pellets IDS from the root /pellet group (whole-pellet model; layout mirrors
 # the NIMROD MHDsimDB files: time_slice[it].pellet[ip].{path_profiles.
 # {ablation_rate, ablated_particles, distance}, shape.size, velocity_initial,
-# species}). Units: rate = n0·l0³ particles / t0 (the cloud is unit-integral,
+# species}) plus one extra field the DB omits: path_profiles.position.{r,z,phi},
+# the pellet/SPI-fragment location at that slice's step (a valid IMAS rzphi1d
+# node — additive, so DB-drop-in readers ignore it; the axisym viewer scatters
+# it). Units: rate = n0·l0³ particles / t0 (the cloud is unit-integral,
 # see `read_pellets`); ablated_particles = Σ rate·dt over ALL steps up to the
 # slice's ntimestep; distance = cumulative cylindrical arc length of the
 # trajectory; species mirror NIMROD's SPI two-species layout — species.0 = D
@@ -1117,6 +1121,11 @@ function _pellets_ir!(
                 (ir["$base.path_profiles.ablated_particles"] = [cum[ip, col] * ucount])
             dist === nothing ||
                 (ir["$base.path_profiles.distance"] = [dist[ip, col] * ulen])
+            # (R,Z,φ) of the pellet at this step — IMAS path_profiles.position
+            # (rzphi1d), one point per slice so the axisym viewer can scatter it.
+            pel.r === nothing || (ir["$base.path_profiles.position.r"] = [pel.r[ip, col] * ulen])
+            pel.z === nothing || (ir["$base.path_profiles.position.z"] = [pel.z[ip, col] * ulen])
+            pel.phi === nothing || (ir["$base.path_profiles.position.phi"] = [pel.phi[ip, col]])
             pel.r_p === nothing || (ir["$base.shape.size"] = [pel.r_p[ip, col] * ulen])
             isfinite(vinit[ip]) && (ir["$base.velocity_initial"] = vinit[ip] * uvel)
             ir["$base.species.0.label"] = "D"
