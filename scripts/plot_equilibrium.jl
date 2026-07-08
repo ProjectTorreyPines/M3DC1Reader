@@ -1,15 +1,19 @@
 #!/usr/bin/env julia
-# Quick equilibrium viewer for the IMAS HDF5 written by export_imas / export_run.
-# For each `equilibrium.time_slice`, it draws the poloidal ψ map with the LCFS
-# picked out in bold, plus the magnetic axis (O-point), the recomputed X-point(s)
-# and the wall/limiter outline. With more than one slice it also stitches the
-# frames into an MP4 (default; GIF optional) so the time evolution plays back at
-# a glance.
+# Quick equilibrium + profiles viewer for the IMAS HDF5 written by export_imas /
+# export_run. Each frame packs the 2D picture and the key 1D profiles side by side:
 #
-# It colours by NORMALIZED flux ψ_N = (ψ − ψ_axis)/(ψ_bnd − ψ_axis): the LCFS is
-# then simply the ψ_N = 1 contour, independent of the COCOS convention the file
-# was written in (ψ, ψ_axis and ψ_bnd all come from the same slice, so any
-# rescaling cancels).
+#   • LEFT  — poloidal ψ map (coloured by normalized flux ψ_N) with the LCFS in
+#     bold, the magnetic axis (O-point), the recomputed X-point(s) and the wall.
+#   • RIGHT — the main core_profiles 1D traces vs ρ_pol: nₑ, Tₑ/Tᵢ, q, and the
+#     total impurity density (or δB/B when there is no impurity). A faint dashed
+#     line shows the first frame as a reference so the evolution is obvious.
+#
+# With more than one slice it also stitches the frames into an MP4 (default; GIF
+# optional) so the time evolution plays back at a glance.
+#
+# ψ_N = (ψ − ψ_axis)/(ψ_bnd − ψ_axis): the LCFS is then simply the ψ_N = 1
+# contour, independent of the COCOS convention the file was written in (ψ, ψ_axis
+# and ψ_bnd all come from the same slice, so any rescaling cancels).
 #
 # Usage (runs in your DEFAULT Julia env, which must have Plots + HDF5 — NOT the
 # package project, which has no plotting deps):
@@ -25,13 +29,22 @@
 #   --format=mp4      movie container: mp4 (default, compact + smooth) | gif
 #   --fps=8           movie frame rate (default: 8)
 #   --slices=0,2,5    equilibrium time_slice indices to plot (0-based; default: all)
-#   --field=psi_norm  color field: psi_norm (default) | psi (raw, per-slice ψ)
+#   --field=psi_norm  2D color field: psi_norm (default) | psi (raw, per-slice ψ)
 #
 # Examples:
 #   julia scripts/plot_equilibrium.jl /scratch/out
 #   julia scripts/plot_equilibrium.jl /scratch/out/M3DC1Reader_imas.h5 --fps=12
 #   julia scripts/plot_equilibrium.jl /scratch/out --slices=0,12,24 --video=false
-#   julia scripts/plot_equilibrium.jl /scratch/out --format=gif
+
+# Headless rendering + HPC env safety. These MUST be set before the `using`
+# lines below, because the native libraries read them when they load:
+#   • GKSwstype=100 → GR writes PNG/MP4 files but never opens an on-screen
+#     window, so this runs fine over SSH / in the background / in a batch job.
+#   • OMP_NUM_THREADS → libgomp (pulled in by the plotting/HDF5 native libs)
+#     aborts if this is empty or non-numeric, which some HPC module environments
+#     leave it as; force a valid value, but keep a valid one the user already set.
+get!(ENV, "GKSwstype", "100")
+occursin(r"^[1-9][0-9]*$", get(ENV, "OMP_NUM_THREADS", "")) || (ENV["OMP_NUM_THREADS"] = "1")
 
 using HDF5
 using Printf: @sprintf
@@ -41,8 +54,9 @@ using Plots
 # The OMAS writer stores dotted IMAS paths as nested groups and transposes N-D
 # arrays for row-major h5py; read back through HDF5.jl (column-major) a Julia
 # (nR,nZ) map returns as (nZ,nR) — exactly what heatmap(R, Z, ψ) wants. Scalars
-# are 0-dim datasets, so `read(...)[]`-style access via `_scalar` handles both.
+# are 0-dim datasets, so `_scalar` handles both the 0-dim and 1-element cases.
 _scalar(g, path) = (v = read(g[path]); v isa AbstractArray ? first(v) : v)
+_rd(g, path) = haskey(g, path) ? read(g[path]) : nothing   # vector or nothing
 
 "Wall/limiter outline (R,Z), closed into a loop; `nothing` if the file has none."
 function read_wall(f)
@@ -54,7 +68,36 @@ function read_wall(f)
     return (R = vcat(r, r[1]), Z = vcat(z, z[1]))     # close the polygon
 end
 
-"Everything needed to draw one equilibrium slice."
+"The 1D core_profiles traces for slice `key`, vs ρ_pol; `nothing` if absent."
+function read_profiles(f, key)
+    haskey(f, "core_profiles/profiles_1d/$key") || return nothing
+    g = f["core_profiles/profiles_1d/$key"]
+    rho = _rd(g, "grid/rho_pol_norm")
+    rho === nothing && return nothing
+    # total impurity density: neutral state 0 + ion charge states 1..Z
+    nimp = nothing
+    if haskey(g, "ion") || haskey(g, "neutral/0/density")
+        acc = zeros(length(rho));  any_imp = false
+        if haskey(g, "ion")
+            for k in keys(g["ion"])
+                k == "0" && continue                 # 0 is the main (fuel) ion
+                d = _rd(g["ion"], "$k/density")
+                d === nothing && continue
+                acc .+= ifelse.(isfinite.(d), d, 0.0);  any_imp = true
+            end
+        end
+        d0 = _rd(g, "neutral/0/density")
+        d0 === nothing || (acc .+= ifelse.(isfinite.(d0), d0, 0.0); any_imp = true)
+        any_imp && (nimp = acc)
+    end
+    return (
+        rho = rho, ne = _rd(g, "electrons/density"),
+        te = _rd(g, "electrons/temperature"), ti = _rd(g, "ion/0/temperature"),
+        q = _rd(g, "q"), dbb = _rd(g, "custom/deltab_over_b"), nimp = nimp,
+    )
+end
+
+"Everything needed to draw one slice: the 2D equilibrium + the 1D profiles."
 function read_slice(f, key)
     g = f["equilibrium/time_slice/$key"]
     R = read(g["profiles_2d/0/grid/dim1"])
@@ -64,10 +107,6 @@ function read_slice(f, key)
     if size(psi) == (length(R), length(Z)) && length(R) != length(Z)
         psi = permutedims(psi)
     end
-    ψa = _scalar(g, "global_quantities/psi_axis")
-    ψb = _scalar(g, "global_quantities/psi_boundary")
-    axis = (R = _scalar(g, "global_quantities/magnetic_axis/r"),
-        Z = _scalar(g, "global_quantities/magnetic_axis/z"))
     xpts = NTuple{2, Float64}[]
     if haskey(g, "boundary/x_point")
         xg = g["boundary/x_point"]
@@ -75,57 +114,142 @@ function read_slice(f, key)
             push!(xpts, (_scalar(xg, "$k/r"), _scalar(xg, "$k/z")))
         end
     end
-    return (R = R, Z = Z, psi = psi, psi_axis = ψa, psi_boundary = ψb,
-        axis = axis, xpoints = xpts, time = _scalar(g, "time"))
+    return (
+        R = R, Z = Z, psi = psi,
+        psi_axis = _scalar(g, "global_quantities/psi_axis"),
+        psi_boundary = _scalar(g, "global_quantities/psi_boundary"),
+        axis = (
+            R = _scalar(g, "global_quantities/magnetic_axis/r"),
+            Z = _scalar(g, "global_quantities/magnetic_axis/z"),
+        ),
+        xpoints = xpts, time = _scalar(g, "time"),
+        prof = read_profiles(f, key),
+    )
 end
 
-# ── plotting ─────────────────────────────────────────────────────────────────
-function plot_slice(s, wall; idx, field, xlims, ylims, clims, ctitle)
+# ── 1D profile panels ────────────────────────────────────────────────────────
+# Candidate panels, in priority order; the first ≤4 with data are shown. Each
+# series is (field-in-prof, legend-label, color, scale). Densities/temps are
+# rescaled to friendly units; ρ_pol is the shared x-axis.
+const PANEL_SPECS = (
+    (id = :ne, ylabel = "nₑ  [10¹⁹ m⁻³]", series = ((:ne, "nₑ", :dodgerblue, 1.0e-19),)),
+    (
+        id = :temp, ylabel = "T  [keV]",
+        series = ((:te, "Tₑ", :red, 1.0e-3), (:ti, "Tᵢ", :darkorange, 1.0e-3)),
+    ),
+    (id = :q, ylabel = "q", series = ((:q, "q", :seagreen, 1.0),)),
+    (id = :nimp, ylabel = "n_imp  [10¹⁹ m⁻³]", series = ((:nimp, "n_imp", :purple, 1.0e-19),)),
+    (id = :dbb, ylabel = "δB/B", series = ((:dbb, "δB/B", :teal, 1.0),)),
+)
+
+_series_y(prof, acc) = prof === nothing ? nothing : getproperty(prof, acc)
+has_data(prof, spec) =
+    any(s -> (y = _series_y(prof, s[1]); y !== nothing && any(isfinite, y)), spec.series)
+
+"Fixed y-limits for a panel across all frames (anchored at 0 for densities/temps)."
+function panel_ylims(spec, profs)
+    vals = Float64[]
+    for pr in profs, (acc, _, _, sc) in spec.series
+        y = _series_y(pr, acc)
+        y === nothing || append!(vals, filter(isfinite, y .* sc))
+    end
+    isempty(vals) && return nothing
+    lo, hi = extrema(vals);  pad = 0.05 * (hi - lo + eps())
+    lo = spec.id in (:ne, :temp, :nimp) ? min(0.0, lo) : lo - pad
+    return (lo, hi + pad)
+end
+
+function panel_1d(spec, prof, ref, ylims)
+    multi = length(spec.series) > 1
+    p = plot(;
+        xlabel = "ρ_pol", ylabel = spec.ylabel, ylims = ylims, xlims = (0, 1),
+        legend = multi ? :best : false, legendfontsize = 6, titlefontsize = 8,
+        labelfontsize = 8, tickfontsize = 6, framestyle = :box
+    )
+    for (acc, sub, col, sc) in spec.series
+        yr = _series_y(ref, acc)
+        yr === nothing || plot!(
+            p, ref.rho, yr .* sc;         # faint first-frame ref
+            c = col, alpha = 0.25, ls = :dash, lw = 1, label = ""
+        )
+        y = _series_y(prof, acc)
+        y === nothing || plot!(
+            p, prof.rho, y .* sc;          # current frame
+            c = col, lw = 2, label = multi ? sub : ""
+        )
+    end
+    return p
+end
+
+# ── 2D equilibrium panel ──────────────────────────────────────────────────────
+function panel_2d(s, wall; field, xlims, ylims, clims, ctitle, title = "")
     if field == :psi
         C = s.psi
-        lcfs = s.psi_boundary                        # LCFS at raw ψ_bnd
+        lcfs = s.psi_boundary
         lines = range(s.psi_axis, s.psi_boundary, length = 10)[2:(end - 1)]
     else
-        span = s.psi_boundary - s.psi_axis
-        C = (s.psi .- s.psi_axis) ./ span            # ψ_N: 0 at axis, 1 at LCFS
+        C = (s.psi .- s.psi_axis) ./ (s.psi_boundary - s.psi_axis)
         lcfs = 1.0
         lines = 0.1:0.1:0.9
     end
 
-    plt = heatmap(s.R, s.Z, C;
+    plt = heatmap(
+        s.R, s.Z, C;
         c = :viridis, clims = clims, colorbar_title = ctitle,
         aspect_ratio = :equal, xlims = xlims, ylims = ylims,
-        xlabel = "R [m]", ylabel = "Z [m]",
-        title = @sprintf("slice %d    t = %.3f ms", idx, s.time * 1.0e3),
-        titlefontsize = 10, size = (620, 720), framestyle = :box,
-        background_color = :white)
+        xlabel = "R [m]", ylabel = "Z [m]", title = title, titlefontsize = 9,
+        labelfontsize = 8, tickfontsize = 7, framestyle = :box
+    )
 
-    # nested flux surfaces (thin, faint) then the LCFS in bold red. The LCFS gets
-    # a black casing under the red line so it stays legible over both the dark
-    # core and the bright scrape-off region.
-    contour!(plt, s.R, s.Z, C; levels = collect(lines),
-        c = :white, alpha = 0.35, lw = 0.6, colorbar_entry = false)
-    contour!(plt, s.R, s.Z, C; levels = [lcfs],
-        c = :black, lw = 4.0, colorbar_entry = false)
-    contour!(plt, s.R, s.Z, C; levels = [lcfs],
-        c = :red, lw = 2.0, colorbar_entry = false)
+    # nested flux surfaces (thin, faint), then the LCFS in bold red over a black
+    # casing so it reads over both the dark core and the bright scrape-off region.
+    contour!(
+        plt, s.R, s.Z, C; levels = collect(lines),
+        c = :white, alpha = 0.35, lw = 0.6, colorbar_entry = false
+    )
+    contour!(plt, s.R, s.Z, C; levels = [lcfs], c = :black, lw = 4.0, colorbar_entry = false)
+    contour!(plt, s.R, s.Z, C; levels = [lcfs], c = :red, lw = 2.0, colorbar_entry = false)
 
-    # wall / limiter
-    wall === nothing || plot!(plt, wall.R, wall.Z;
-        c = :black, lw = 2, label = "wall")
-
-    # O-point (magnetic axis) and X-point(s)
-    scatter!(plt, [s.axis.R], [s.axis.Z]; marker = :circle, ms = 6,
-        c = :red, markerstrokecolor = :white, markerstrokewidth = 1.5,
-        label = "O-point")
-    if !isempty(s.xpoints)
-        scatter!(plt, first.(s.xpoints), last.(s.xpoints);
-            marker = :xcross, ms = 8, c = :cyan, markerstrokewidth = 3,
-            label = "X-point")
-    end
-    plot!(plt; legend = :topleft, legendfontsize = 7,
-        foreground_color_legend = nothing, background_color_legend = RGBA(1, 1, 1, 0.6))
+    wall === nothing || plot!(plt, wall.R, wall.Z; c = :black, lw = 2, label = "wall")
+    scatter!(
+        plt, [s.axis.R], [s.axis.Z]; marker = :circle, ms = 6, c = :red,
+        markerstrokecolor = :white, markerstrokewidth = 1.5, label = "O-point"
+    )
+    isempty(s.xpoints) || scatter!(
+        plt, first.(s.xpoints), last.(s.xpoints);
+        marker = :xcross, ms = 8, c = :cyan, markerstrokewidth = 3, label = "X-point"
+    )
+    plot!(
+        plt; legend = :topleft, legendfontsize = 6,
+        foreground_color_legend = nothing, background_color_legend = RGBA(1, 1, 1, 0.6)
+    )
     return plt
+end
+
+# ── one composed frame (2D + 1D panels) ───────────────────────────────────────
+function plot_frame(s, ref, wall, specs, pylims; idx, field, xlims, ylims, clims, ctitle, reftime = nothing)
+    base = @sprintf("slice %d      t = %.3f ms", idx, s.time * 1.0e3)
+    isempty(specs) &&                                  # no core_profiles → 2D only
+        return panel_2d(s, wall; field, xlims, ylims, clims, ctitle, title = base)
+
+    # The dashed curve in every 1D panel is the first frame — note it in the title
+    # (only present when there is more than one slice).
+    suptitle = reftime === nothing ? base :
+        base * @sprintf("        (dashed = initial, t = %.3f ms)", reftime * 1.0e3)
+    p2d = panel_2d(s, wall; field, xlims, ylims, clims, ctitle)
+    p1d = [panel_1d(specs[k], s.prof, ref, pylims[k]) for k in eachindex(specs)]
+    n = length(specs)
+    # The 2D map is aspect-locked (tall + narrow), so it only needs a slim column;
+    # a small left fraction hands the extra width to the 1D profiles' x-axes.
+    l = n == 4 ? (@layout [a{0.36w} grid(2, 2)]) :
+        n == 3 ? (@layout [a{0.34w} grid(3, 1)]) :
+        n == 2 ? (@layout [a{0.42w} grid(2, 1)]) :
+        (@layout [a{0.5w} b])
+    return plot(
+        p2d, p1d...; layout = l, size = (1500, 780),
+        plot_title = suptitle, plot_titlefontsize = 11,
+        left_margin = 3Plots.mm, bottom_margin = 3Plots.mm
+    )
 end
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
@@ -149,7 +273,7 @@ function main(args)
     end
     isempty(input) && error(
         "usage: plot_equilibrium <imas.h5 | folder> " *
-            "[--outdir= --gif=true|false --fps= --slices= --field=psi_norm|psi]"
+            "[--outdir= --video=true|false --format=mp4|gif --fps= --slices= --field=psi_norm|psi]"
     )
 
     h5 = isdir(input) ? joinpath(input, "M3DC1Reader_imas.h5") : input
@@ -173,34 +297,44 @@ function main(args)
     sel = [i for (i, k) in enumerate(keys_all) if want === nothing || parse(Int, k) in want]
     isempty(sel) && error("no matching slices (have indices $(join(keys_all, ',')))")
 
-    # Common frame: union of grid extents + a fixed color scale across time.
+    # Common frame across time: union of grid extents + a fixed 2D color scale.
     xlims = (minimum(s -> s.R[1], slices), maximum(s -> s.R[end], slices))
     ylims = (minimum(s -> s.Z[1], slices), maximum(s -> s.Z[end], slices))
     if field == :psi
         allψ = filter(isfinite, reduce(vcat, [vec(slices[i].psi) for i in sel]))
         clims = (minimum(allψ), maximum(allψ));  ctitle = "ψ"
     else
-        # ψ_N ∈ [0,1] in the core; a bit of headroom keeps the scrape-off region a
-        # visible gradient (not a flat saturated band) so the LCFS line stands out.
+        # ψ_N ∈ [0,1] in the core; headroom keeps the scrape-off region a visible
+        # gradient (not a flat saturated band) so the LCFS line stands out.
         clims = (0.0, 1.2);  ctitle = "ψ_N"
     end
 
-    @info "plot_equilibrium" file = h5 slices = length(sel) outdir = outdir field = field
+    # Pick the 1D panels (first ≤4 with data) and their fixed y-limits; the faint
+    # reference curve is the first selected slice.
+    profs = [slices[i].prof for i in sel]
+    specs = [sp for sp in PANEL_SPECS if has_data(first(profs), sp)]
+    length(specs) > 4 && (specs = specs[1:4])
+    pylims = [panel_ylims(sp, profs) for sp in specs]
+    ref = length(sel) > 1 ? first(profs) : nothing
+
+    @info "plot_equilibrium" file = h5 slices = length(sel) outdir = outdir field = field profiles = [sp.id for sp in specs]
+    reftime = ref === nothing ? nothing : slices[first(sel)].time
+    frame(i) = plot_frame(
+        slices[i], ref, wall, specs, pylims;
+        idx = parse(Int, keys_all[i]), field = field,
+        xlims = xlims, ylims = ylims, clims = clims, ctitle = ctitle, reftime = reftime
+    )
+
     pngs = String[]
     for i in sel
-        s = slices[i]
-        plt = plot_slice(s, wall; idx = parse(Int, keys_all[i]),
-            field = field, xlims = xlims, ylims = ylims, clims = clims, ctitle = ctitle)
         png = joinpath(outdir, @sprintf("equilibrium_%03d.png", parse(Int, keys_all[i])))
-        savefig(plt, png);  push!(pngs, png)
-        @info "  wrote" png = basename(png) t_ms = round(s.time * 1.0e3, digits = 3)
+        savefig(frame(i), png);  push!(pngs, png)
+        @info "  wrote" png = basename(png) t_ms = round(slices[i].time * 1.0e3, digits = 3)
     end
 
     if make_video && length(sel) > 1
         anim = @animate for i in sel
-            s = slices[i]
-            plot_slice(s, wall; idx = parse(Int, keys_all[i]),
-                field = field, xlims = xlims, ylims = ylims, clims = clims, ctitle = ctitle)
+            frame(i)
         end
         vpath = joinpath(outdir, "equilibrium_evolution.$fmt")
         (fmt == "mp4" ? mp4 : gif)(anim, vpath; fps = fps)

@@ -17,15 +17,17 @@
 #                       FSA (default: true; --ascot=false writes IMAS only)
 #   --nbins=128         FSA radial bins
 #   --ngrid=200         R-Z evaluation grid (ngrid × ngrid)
-#   --cocos=11          11 (IMAS) | mhdsimdb (NIMROD-DB drop-in) | raw (per-radian)
+#   --cocos=mhdsimdb    mhdsimdb (NIMROD-DB drop-in, default) | 11 (standard IMAS) | raw (per-radian)
 #   --fsa=cumulative    ratio-profile FSA estimator: cumulative (smooth, default) | bin (raw)
 #   --fsa_window=4      cumulative regression window (smaller = follows pedestal tighter)
 #   --pulse=<int>       dataset_description.data_entry.pulse
 #   --slices=0,12,24    comma-separated timeslice indices (default: all)
 #
-# NOTE: this runner defaults to --fsa=cumulative (de-noised ne/Te/dB-over-B
-# profiles). The library `export_imas` default is fsa_method=:bin for backward
-# compatibility; pass --fsa=bin here to reproduce the raw per-bin estimator.
+# NOTE: this runner picks workflow-oriented defaults that differ from the library
+# `export_imas` (which keeps standards-oriented defaults):
+#   • --fsa=cumulative  (de-noised ne/Te/dB-over-B) vs library fsa_method=:bin
+#   • --cocos=mhdsimdb  (NIMROD-DB drop-in layout)   vs library cocos=11 (IMAS)
+# Pass --fsa=bin / --cocos=11 to reproduce the library defaults.
 #
 # Examples:
 #   julia --project=. scripts/export_run.jl /scratch/run_042
@@ -73,7 +75,11 @@ function main(args)
     nbins = parse(Int, get(opts, "nbins", "128"))
     ngrid = parse(Int, get(opts, "ngrid", "200"))
     pulse = haskey(opts, "pulse") ? parse(Int, opts["pulse"]) : nothing
-    cocos = let c = get(opts, "cocos", "11")
+    # This runner defaults to the MHDsimDB drop-in layout (the library default is
+    # cocos=11), so exports land in the NIMROD-derived disruption-database format
+    # by default; pass --cocos=11 for the standard IMAS layout, --cocos=raw for the
+    # untouched M3D-C1 per-radian ψ.
+    cocos = let c = get(opts, "cocos", "mhdsimdb")
         c == "11" ? 11 : c == "mhdsimdb" ? :mhdsimdb :
             (c == "raw" || c == "nothing") ? nothing :
             error("cocos must be 11 | mhdsimdb | raw, got $c")
