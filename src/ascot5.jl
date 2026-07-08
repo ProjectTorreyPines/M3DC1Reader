@@ -7,10 +7,12 @@
 # coreio/fileapi.py) — see docs/ascot5_writer.md.
 #
 # Time handling: ASCOT5 traces particles in a STATIC field, so each MHD
-# slice gets its own input file (one run per snapshot); the DB pipeline
-# matches runs to slices by the step number in the `ascot<step>.h5` output
-# filename, so `write_ascot5` embeds the slice's ntimestep in the default
-# output name.
+# slice gets its own input file (one run per snapshot). The default name is keyed
+# on the slice INDEX, mirroring M3D-C1's own `time_%03d.h5` layout (time_024.h5 ↔
+# ascot_input_024.h5) so inputs pair 1:1 with their source slice. The DB
+# pipeline's step-from-filename parsers read the FIRST digits after `ascot` as
+# the MHD-time key, so no digit may touch the prefix (`ascot5_…` would be read as
+# step 5, disagreeing with the end-anchored parser) — hence `ascot_input_`.
 
 using Dates: now, format
 
@@ -229,11 +231,14 @@ noise into ν∝n_e/T_e^{3/2}). `fsa_window` (default 4) tunes the `:cumulative`
 regression width. See [`reduce_axisym_slice`](@ref); `scripts/export_run` passes
 `:cumulative` by default.
 
-`out_path=""` names the file `ascot5_in_<ntimestep>.h5` next to the C1.h5 —
-the step number is what the DB pipeline later uses to match ASCOT output
-files to MHD slices. Off-mesh grid points in the B field are `NaN` (fill
-strategy pending — docs/ascot5_writer.md); a5py reads the file fine, but the
-field must be filled before an actual ASCOT run.
+`out_path=""` names the file `ascot_input_<slice>.h5` next to the C1.h5, using the
+zero-padded slice INDEX (e.g. `ascot_input_024.h5` for slice 24), mirroring
+M3D-C1's `time_%03d.h5` so each input lines up 1:1 with its source slice. (No
+digit abuts the `ascot` prefix — the DB pipeline reads the first digits after
+`ascot` as the MHD-time key.) The ntimestep is recorded in the group
+`description`, not the filename. Off-mesh grid
+points in the B field are `NaN` (fill strategy pending — docs/ascot5_writer.md);
+a5py reads the file fine, but the field must be filled before an actual ASCOT run.
 """
 function write_ascot5(
         file::M3DC1File, ts::Integer, out_path::AbstractString = "";
@@ -245,9 +250,16 @@ function write_ascot5(
     norm = normalization(file)
     bf = ascot5_bfield(file, ts; nR = nR, nZ = nZ, nphi = nphi, margin = margin)
     if isempty(out_path)
-        out_path = joinpath(dirname(file.path), "ascot5_in_$(bf.nstep).h5")
+        # Name by the zero-padded slice INDEX, mirroring M3D-C1's `time_%03d.h5`
+        # so inputs pair 1:1 with their source slice (time_024.h5 ↔
+        # ascot_input_024.h5). No digit may abut the `ascot` prefix: the DB
+        # pipeline's step-from-filename parsers read the first digits after
+        # `ascot` as the MHD-time key, so `ascot5_…` would parse as step 5.
+        # ntimestep is kept in `desc`, not the filename.
+        out_path = joinpath(dirname(file.path), "ascot_input_$(lpad(ts, 3, '0')).h5")
     end
-    isempty(desc) && (desc = "M3DC1Reader $(basename(file.path)) slice $ts (t=$(bf.time) s)")
+    isempty(desc) &&
+        (desc = "M3DC1Reader $(basename(file.path)) slice $ts (ntimestep=$(bf.nstep), t=$(bf.time) s)")
 
     # FSA background plasma on the shared ρ_pol grid
     ep = elems_plane(file)
