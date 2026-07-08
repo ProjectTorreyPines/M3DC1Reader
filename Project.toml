@@ -8,6 +8,7 @@ AdaptiveArrayPools = "4f381ef7-9af0-4cbe-99d4-cf36d7b0f233"
 Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
 FastInterpolations = "9ea80cae-fc13-4c00-8066-6eaedb12f34b"
 HDF5 = "f67ccb44-e63f-5c2f-98bd-6dc0ccc4ba2f"
+Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
 
 [weakdeps]
 EFIT = "cda752c5-6b03-55a3-9e33-132a441b0c17"
@@ -29,4 +30,5 @@ HDF5 = "0.17"
 IMAS = "7"
 IMASdd = "8"
 MXHEquilibrium = "1"
+Printf = "1"
 julia = "1.11"

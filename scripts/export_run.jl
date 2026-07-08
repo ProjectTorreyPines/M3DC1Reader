@@ -98,7 +98,6 @@ function main(args)
         fsa_method = fsa_method, fsa_window = fsa_window,
         ascot5 = ascot5, verbose = true
     )
-    @info "IMAS export written" out ascot5
 
     return out
 end

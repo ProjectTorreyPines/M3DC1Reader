@@ -1,6 +1,8 @@
 # export_imas.jl — orchestrate the FSA reduction over all slices and assemble
 # an OMAS-path IR dict for write_omas_h5.
 
+using Printf: @sprintf
+
 _maybe!(ir, k, v) = (v !== nothing && (ir[k] = v); nothing)
 
 # shared per-IDS boilerplate (properties + time base)
@@ -876,12 +878,19 @@ function export_imas(
     results = NamedTuple[]
     nsteps = Int[]                      # each slice's ntimestep (0D trace sampling)
     nsl = length(slices)
+    # compact duration string for progress logs: "8.4s" or "2m05s"
+    _fmt_dur(s) = s < 60 ? "$(round(s, digits = 1))s" :
+        "$(floor(Int, s / 60))m$(lpad(round(Int, s % 60), 2, '0'))s"
     if verbose
         rlo, rhi = extrema(ep[5, :]);  zlo, zhi = extrema(ep[6, :])
         kp = kprad_z ≥ 0 ? "$(kprad_z + 1) charge states" : "off"
-        @info "export_imas: $(basename(String(file.path)))" slices = nsl mesh = "$(size(ep, 2)) elems × $(file.nplanes) planes" grid = "$(ngrid)×$(ngrid)  R∈[$(round(rlo, digits = 3)), $(round(rhi, digits = 3))]  Z∈[$(round(zlo, digits = 3)), $(round(zhi, digits = 3))]" kprad = kp fprime = fprime cocos = cocos out = out_path
+        @info "export_imas: $(basename(String(file.path)))" slices = nsl mesh = "$(size(ep, 2)) elems × $(file.nplanes) planes" grid = "$(ngrid)×$(ngrid)  R∈[$(round(rlo, digits = 3)), $(round(rhi, digits = 3))]  Z∈[$(round(zlo, digits = 3)), $(round(zhi, digits = 3))]" kprad = kp fprime = fprime cocos = cocos ascot5 = ascot5 out = out_path
+        println(stderr)                 # blank line: detailed setup ┄ terse per-slice progress
     end
     t_start = time()
+    t_warm = t_start                    # ETA baseline; reset after slice 1 (compile)
+    kw = ndigits(nsl)                   # column widths (we know nsl and every ts up front)
+    tw = isempty(slices) ? 1 : maximum(ndigits, slices)
     for (isl, ts) in enumerate(slices)
         t_sl = time()
         # One open per slice reads ψ + every optional field together into the
@@ -915,11 +924,26 @@ function export_imas(
                 apath, file, ep, norm, kprad_z, bf, res,
                 _ascot5_default_desc(file, ts, bf)
             )
-            verbose && @info "  ascot5 input written" out = basename(apath)
         end
-        verbose && @info "  slice [$isl/$nsl] ts=$ts done" ntimestep = sl.nstep t_ms = round(sl.time * utime * 1.0e3, digits = 4) elapsed_s = round(time() - t_sl, digits = 2)
+        if verbose
+            # one short, column-aligned line per slice: [k/n], ts, physical time,
+            # the wall time this slice took, and a running ETA. lpad handles the
+            # width-variable integers; @sprintf fixes the float decimals so the
+            # columns line up. slice 1 carries the JIT cost, so the ETA baseline
+            # (`t_warm`) starts from slice 2.
+            # remaining-time estimate on every non-last slice. slice 1 has only its
+            # own (JIT-heavy) time to go on, so its ETA is a rough upper bound; from
+            # slice 2 the warm average (excluding slice 1) makes it accurate.
+            per = isl == 1 ? (time() - t_sl) : (time() - t_warm) / (isl - 1)
+            isl == 1 && (t_warm = time())
+            eta = isl < nsl ? "   ETA $(_fmt_dur(per * (nsl - isl)))" : ""
+            prog = "[$(lpad(isl, kw))/$nsl]"
+            tms = @sprintf("%6.2f", sl.time * utime * 1.0e3)
+            took = @sprintf("%5.1f", time() - t_sl)
+            @info "  $prog ts=$(lpad(ts, tw))   t=$tms ms   took $(took)s$eta"
+        end
     end
-    verbose && @info "export_imas: FSA done for $nsl slices in $(round(time() - t_start, digits = 1)) s; assembling IR + writing…"
+    verbose && @info "export_imas: $nsl slices done in $(_fmt_dur(time() - t_start)); writing $(basename(String(out_path)))…"
 
     cmt = !isempty(comment) ? comment :
         cocos == 11 ?
@@ -958,7 +982,7 @@ function export_imas(
     pulse === nothing || (ir["dataset_description.data_entry.pulse"] = Int(pulse))
 
     written = write_omas_h5(out_path, ir)
-    verbose && @info "export_imas: wrote $written" slices = nsl total_s = round(time() - t_start, digits = 1)
+    verbose && @info "export_imas: done — $nsl slices in $(_fmt_dur(time() - t_start)) → $written"
     return written
 end
 
