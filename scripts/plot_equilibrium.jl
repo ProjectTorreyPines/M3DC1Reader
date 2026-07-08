@@ -21,8 +21,9 @@
 #   julia scripts/plot_equilibrium.jl <imas.h5 | folder> [--key=value ...]
 #   scripts/plot_equilibrium         <imas.h5 | folder> [--key=value ...]   # wrapper
 #
-# The only positional argument is the input: the M3DC1Reader IMAS HDF5 file, or a
-# folder containing `M3DC1Reader_imas.h5`. Options are all --key=value:
+# The only positional argument is the input: the M3DC1Reader OMAS HDF5 file, or a
+# folder containing `M3DC1_axisym.h5` (the old `M3DC1Reader_imas.h5` name still
+# works). Options are all --key=value:
 #
 #   --outdir=<path>   where to write the PNGs/video (default: <input folder>/equilibrium_plots)
 #   --video=true      also write a time-evolution movie when >1 slice (default: true)
@@ -33,7 +34,7 @@
 #
 # Examples:
 #   julia scripts/plot_equilibrium.jl /scratch/out
-#   julia scripts/plot_equilibrium.jl /scratch/out/M3DC1Reader_imas.h5 --fps=12
+#   julia scripts/plot_equilibrium.jl /scratch/out/M3DC1_axisym.h5 --fps=12
 #   julia scripts/plot_equilibrium.jl /scratch/out --slices=0,12,24 --video=false
 
 # Headless rendering + HPC env safety. These MUST be set before the `using`
@@ -163,8 +164,8 @@ function panel_1d(spec, prof, ref, ylims)
     multi = length(spec.series) > 1
     p = plot(;
         xlabel = "ρ_pol", ylabel = spec.ylabel, ylims = ylims, xlims = (0, 1),
-        legend = multi ? :best : false, legendfontsize = 6, titlefontsize = 8,
-        labelfontsize = 8, tickfontsize = 6, framestyle = :box
+        legend = multi ? :best : false, legendfontsize = 12, titlefontsize = 12,
+        labelfontsize = 12, tickfontsize = 10, framestyle = :box
     )
     for (acc, sub, col, sc) in spec.series
         yr = _series_y(ref, acc)
@@ -197,8 +198,8 @@ function panel_2d(s, wall; field, xlims, ylims, clims, ctitle, title = "")
         s.R, s.Z, C;
         c = :viridis, clims = clims, colorbar_title = ctitle,
         aspect_ratio = :equal, xlims = xlims, ylims = ylims,
-        xlabel = "R [m]", ylabel = "Z [m]", title = title, titlefontsize = 9,
-        labelfontsize = 8, tickfontsize = 7, framestyle = :box
+        xlabel = "R [m]", ylabel = "Z [m]", title = title, titlefontsize = 12,
+        labelfontsize = 12, tickfontsize = 10, framestyle = :box
     )
 
     # nested flux surfaces (thin, faint), then the LCFS in bold red over a black
@@ -276,8 +277,15 @@ function main(args)
             "[--outdir= --video=true|false --format=mp4|gif --fps= --slices= --field=psi_norm|psi]"
     )
 
-    h5 = isdir(input) ? joinpath(input, "M3DC1Reader_imas.h5") : input
-    isfile(h5) || error("no IMAS HDF5 found at: $h5")
+    # A folder resolves to the default export name (fall back to the old name so
+    # files exported before the rename still plot).
+    h5 = if !isdir(input)
+        input
+    else
+        cand = joinpath(input, "M3DC1_axisym.h5")
+        isfile(cand) ? cand : joinpath(input, "M3DC1Reader_imas.h5")
+    end
+    isfile(h5) || error("no OMAS/IMAS HDF5 found in: $input")
     outdir = get(opts, "outdir", joinpath(dirname(abspath(h5)), "equilibrium_plots"))
     mkpath(outdir)
     make_video = get(opts, "video", "true") in ("true", "on", "yes", "1")

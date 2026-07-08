@@ -6,7 +6,7 @@
 # It handles the Julia setup (module load + project activation) and then runs
 # scripts/export_run.jl. Point it at a run folder; the multi-GB time_*.h5 slice
 # files next to C1.h5 are read via external links, and the IMAS HDF5 is written
-# into the same folder (default <run_dir>/M3DC1Reader_imas.h5).
+# into the same folder (default <run_dir>/M3DC1_axisym.h5).
 #
 # One-time env setup (registries + deps) before first use:
 #   julia --project=. -e 'using Pkg;

@@ -11,8 +11,8 @@
 # C1.h5 path itself. Everything else is a --key=value option:
 #
 #   --outdir=<path>     output folder for ALL outputs (default: <run_dir>, created
-#                       if missing): the IMAS file (M3DC1Reader_imas.h5) and, when
-#                       --ascot=true, the ASCOT5 inputs (ascot_input_<idx>.h5).
+#                       if missing): the axisymmetric OMAS file (M3DC1_axisym.h5)
+#                       and, when --ascot=true, the ASCOT5 inputs (ascot_input_<idx>.h5).
 #   --ascot=true        also write an ASCOT5 input per exported slice, reusing its
 #                       FSA (default: true; --ascot=false writes IMAS only)
 #   --nbins=128         FSA radial bins
@@ -69,7 +69,9 @@ function main(args)
     # Output folder holds both the IMAS file and the ASCOT5 inputs (default: rundir).
     out_folder = get(opts, "outdir", rundir)
     mkpath(out_folder)
-    out = joinpath(out_folder, "M3DC1Reader_imas.h5")
+    # Axisymmetric OMAS/IMAS-DD output (the n=0 FSA reduction; the 3D fields go to
+    # the ASCOT5 inputs). Named like the NIMROD DB entries' <CODE>_ prefix.
+    out = joinpath(out_folder, "M3DC1_axisym.h5")
 
     # Parse options with defaults matching export_imas.
     nbins = parse(Int, get(opts, "nbins", "128"))
