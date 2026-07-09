@@ -8,6 +8,12 @@
 #     sbatch scripts/scan_export.slurm                     # else uses DEFAULT_LIST
 # (adjust --ntasks etc. with sbatch flags too, e.g.  sbatch --ntasks=16 … <list>)
 #
+# Re-run only ONE step without editing the file (env passes through to the ranks):
+#     sbatch --export=ALL,FORCE=1 scripts/scan_export.slurm <list>                # redo everything
+#     sbatch --export=ALL,DO_EXPORT=0,FORCE=1 scripts/scan_export.slurm <list>    # re-PLOT only (reuse exports)
+#     sbatch --export=ALL,DO_PLOT=0,FORCE=1   scripts/scan_export.slurm <list>    # re-EXPORT only
+# (plot-only is cheap — it reuses each run's M3DC1_axisym.h5 and just redraws the frames.)
+#
 #SBATCH --job-name=m3dc1_scan
 #SBATCH --nodes=1
 #SBATCH --ntasks=26              # = number of parallel ranks (NRANKS)
@@ -23,12 +29,20 @@ set -euo pipefail
 # set; keep GR headless too. (export_run/plot_equilibrium also self-guard.)
 [[ "${OMP_NUM_THREADS:-}" =~ ^[1-9][0-9]*$ ]] || export OMP_NUM_THREADS=1
 export GKSwstype="${GKSwstype:-100}"
+# GPFS/Lustre: HDF5≥1.10 takes an flock() on every file it opens (even read-only);
+# on parallel filesystems that lock can fail under many concurrent opens ("unable
+# to open file"). No two ranks ever write the same file, so disabling it is safe.
+export HDF5_USE_FILE_LOCKING="${HDF5_USE_FILE_LOCKING:-FALSE}"
 
 # ---- EDIT THESE (the run list is normally passed as sbatch argument(s)) ------
 REPO=/scratch/gpfs/myoo/M3DC1Reader          # clone containing scripts/
 export OUTBASE=/scratch/gpfs/myoo/M3DC1_DB     # output root ($OUTBASE/<run name>/)
 export EXPORT_OPTS=""                        # e.g. "--slices=0,24"; "" = all slices
 export PLOT_OPTS=""                          # e.g. "--fps=12"
+export FORCE="${FORCE:-0}"                   # 1 = overwrite existing outputs (else skip/resume);
+                                             #   also settable per-submit: sbatch --export=ALL,FORCE=1 …
+export DO_EXPORT="${DO_EXPORT:-1}"           # 0 = skip export step (e.g. plot-only re-run)
+export DO_PLOT="${DO_PLOT:-1}"               # 0 = skip plot step   (e.g. export-only re-run)
 DEFAULT_LIST=/home/myoo//m3dc1_spi_folder_list_on_Stellar.txt    # used only when no argument is given
 
 # -----------------------------------------------------------------------------

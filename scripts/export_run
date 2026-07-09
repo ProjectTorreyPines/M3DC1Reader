@@ -15,6 +15,12 @@
 #       Pkg.instantiate()'
 set -euo pipefail
 
+# GPFS/Lustre: HDF5≥1.10 takes an flock() on every file it opens (even read-only);
+# on parallel filesystems that lock can fail ("unable to open file"), esp. under
+# many concurrent opens. This runner only writes files it alone owns, so disabling
+# the lock is safe. (Respects an already-set value.)
+export HDF5_USE_FILE_LOCKING="${HDF5_USE_FILE_LOCKING:-FALSE}"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
 

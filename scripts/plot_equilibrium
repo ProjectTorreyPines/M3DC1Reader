@@ -28,6 +28,9 @@ export GKSwstype="${GKSwstype:-100}"
 # makes libgomp (pulled in by the plotting/HDF5 native libs) abort. Force a valid
 # value, but keep a valid one the user already set.
 [[ "${OMP_NUM_THREADS:-}" =~ ^[1-9][0-9]*$ ]] || export OMP_NUM_THREADS=1
+# GPFS/Lustre: HDF5≥1.10 flock()s files on open, which can fail on parallel
+# filesystems; we only read here, so disabling the lock is safe. (Respects a set value.)
+export HDF5_USE_FILE_LOCKING="${HDF5_USE_FILE_LOCKING:-FALSE}"
 
 if [[ -n "${M3DC1_VIZ_PROJECT:-}" ]]; then
     exec julia --project="$M3DC1_VIZ_PROJECT" "$SCRIPT_DIR/plot_equilibrium.jl" "$@"

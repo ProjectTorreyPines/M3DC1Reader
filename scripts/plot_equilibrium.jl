@@ -248,11 +248,16 @@ function panel_2d(s, wall; field, xlims, ylims, clims, ctitle, title = "", trail
         marker = :xcross, ms = 8, c = :cyan, markerstrokewidth = 3, label = "X-point"
     )
     # fading comet-tail: pellet positions from earlier slices, older = fainter, so
-    # the (sampled) trajectory reads at a glance under the current markers.
+    # the (sampled) trajectory reads at a glance under the current markers. Split the
+    # alpha budget across the fragment count so a dense SPI cloud (many overlapping
+    # points) doesn't stack into a saturated blob — a lone pellet keeps the full
+    # ~0.4, and it's floored so very large clouds don't vanish entirely.
     nt = length(trail)
+    npel = maximum(length, trail; init = 1)            # SPI fragments per slice (≈ constant)
+    amax = clamp(0.4 / sqrt(npel), 0.1, 0.4)
     for (j, past) in enumerate(trail)
         isempty(past) && continue
-        a = 0.1 + 0.3 * (j / max(nt, 1))               # ramp toward the present
+        a = amax * (0.3 + 0.7 * (j / max(nt, 1)))      # ramp toward the present
         scatter!(
             plt, first.(past), last.(past);
             marker = :circle, ms = 2.2, c = :magenta, alpha = a,

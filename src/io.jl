@@ -40,11 +40,33 @@ struct M3DC1File
     elems::Matrix{Float64}
 end
 
+# First `time_NNN` group (lowest index) whose external-link target actually opens.
+# C1.h5 stores each slice as an external link into a multi-GB `time_NNN.h5`; when
+# only a subset of those is present locally (or one is unreadable/mid-write), the
+# lowest-index *key* may be a broken link. Blindly opening it (the old behaviour)
+# aborted the whole run on, e.g., a missing `time_000.h5`; instead skip to the
+# first slice that resolves — the mesh/normalization are slice-independent, so any
+# accessible slice serves. Errors only if NONE of the slices open.
 function _first_time_group(f::HDF5.File)
-    for k in keys(f)
-        startswith(k, "time_") && return k
+    HDF5.API.h5e_set_auto(HDF5.API.H5E_DEFAULT, C_NULL, C_NULL)   # silence HDF5 error stack
+    names = sort(
+        [k for k in keys(f) if startswith(k, "time_") && tryparse(Int, k[6:end]) !== nothing];
+        by = k -> parse(Int, k[6:end]),
+    )
+    isempty(names) && error("no `time_NNN` group found in $(HDF5.filename(f))")
+    for k in names
+        try
+            close(f[k])          # force external-link resolution, then release the handle
+            return k
+        catch
+            # broken / inaccessible external link — try the next slice
+        end
     end
-    error("no `time_NNN` group found in $(HDF5.filename(f))")
+    return error(
+        "no accessible `time_NNN` slice in $(HDF5.filename(f)) — every external link " *
+            "(e.g. `$(first(names))` → its `time_*.h5`) failed to open; check the run " *
+            "folder still has the `time_*.h5` files and that they are readable",
+    )
 end
 
 function M3DC1File(path::AbstractString; ts_ref::Union{Nothing, Integer} = nothing)
